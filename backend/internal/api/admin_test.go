@@ -47,6 +47,74 @@ func TestHandleLoginReturnsForbiddenForBannedIP(t *testing.T) {
 	}
 }
 
+func TestHandleLoginRequiresSetupBeforeDefaultLogin(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/login", strings.NewReader(`{"username":"admin","password":"admin123"}`))
+	rr := httptest.NewRecorder()
+	(&AdminServer{
+		Catalog:       cat,
+		Auth:          &auth.Authenticator{Username: "admin", Password: "admin123", Catalog: cat},
+		SetupRequired: func() bool { return true },
+	}).handleLogin(rr, req)
+
+	if rr.Code != http.StatusPreconditionRequired {
+		t.Fatalf("status = %d, want 428; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleSetupStoresCredentialsAndCreatesSession(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+	authr := &auth.Authenticator{Username: "admin", Password: "admin123", Catalog: cat}
+	setupRequired := true
+	var savedUser, savedPass string
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/setup", strings.NewReader(`{"username":"owner","password":"secret123"}`))
+	rr := httptest.NewRecorder()
+
+	(&AdminServer{
+		Catalog:       cat,
+		Auth:          authr,
+		SetupRequired: func() bool { return setupRequired },
+		OnSetup: func(username, password string) error {
+			savedUser, savedPass = username, password
+			authr.SetCredentials(username, password)
+			setupRequired = false
+			return nil
+		},
+	}).handleSetup(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if savedUser != "owner" || savedPass != "secret123" {
+		t.Fatalf("saved credentials = %q/%q, want owner/secret123", savedUser, savedPass)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("setup did not set a session cookie")
+	}
+	ok, err := cat.ValidateSession(context.Background(), cookies[0].Value)
+	if err != nil || !ok {
+		t.Fatalf("setup session valid=%v err=%v", ok, err)
+	}
+}
+
 func TestHandleUpsertDrivePreservesExistingCredentialsWhenRequestCredentialsEmpty(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(t.TempDir() + "/catalog.db")

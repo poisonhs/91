@@ -2,7 +2,7 @@
 // replaces the legacy scanLoop / crawlerLoop / spider91 migrator periodic loop.
 //
 // Pipeline (fired once per day at cron_hour, also via TriggerNow for admin
-// "立即跑全流程"):
+// "扫描所有网盘"):
 //
 //	Phase 1: for each non-spider91 cloud drive
 //	           scan + delete-detection + enqueue thumb + enqueue teaser
@@ -192,7 +192,7 @@ func (r *Runner) runPipelineLocked(ctx context.Context, manual bool) {
 
 	// Mark today as processed regardless of success/error. This is intentional:
 	// a partial / failing pipeline shouldn't trigger again the same day, the
-	// admin can inspect logs and click "立即跑全流程" to retry explicitly.
+	// admin can inspect logs and click "扫描所有网盘" to retry explicitly.
 	dateStr := started.Format(dateLayout)
 	if err := r.cfg.Settings.SetSetting(ctx, settingLastRunDate, dateStr); err != nil {
 		log.Printf("[nightly] persist last_run_date: %v", err)

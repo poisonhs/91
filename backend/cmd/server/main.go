@@ -101,6 +101,8 @@ func main() {
 		Password: cfg.Server.Admin.Password,
 		Catalog:  cat,
 	}
+	setupRequired := config.RequiresAdminSetup(cfg)
+	var setupMu sync.Mutex
 
 	apiServer := &api.Server{
 		Catalog:   cat,
@@ -114,8 +116,28 @@ func main() {
 	}
 
 	adminServer := &api.AdminServer{
-		Catalog:         cat,
-		Auth:            authr,
+		Catalog: cat,
+		Auth:    authr,
+		SetupRequired: func() bool {
+			setupMu.Lock()
+			defer setupMu.Unlock()
+			return setupRequired
+		},
+		OnSetup: func(username, password string) error {
+			setupMu.Lock()
+			defer setupMu.Unlock()
+			if !setupRequired {
+				return nil
+			}
+			if err := config.WriteAdminCredentials(cfgPath, username, password); err != nil {
+				return err
+			}
+			cfg.Server.Admin.Username = username
+			cfg.Server.Admin.Password = password
+			authr.SetCredentials(username, password)
+			setupRequired = false
+			return nil
+		},
 		LocalPreviewDir: cfg.Storage.LocalPreviewDir,
 		OnDriveSaved: func(driveID string) error {
 			d, err := cat.GetDrive(ctx, driveID)
@@ -195,7 +217,7 @@ func main() {
 	//   Phase 1 扫所有非 spider91 / localupload 网盘 + 删除检测 + 入队封面/teaser
 	//   Phase 2 spider91 爬虫 + 入队 teaser
 	//   Phase 3 spider91 → 云盘迁移
-	// 也响应 admin "立即跑全流程" 按钮（POST /admin/api/jobs/nightly/run → TriggerNow）。
+	// 也响应 admin "扫描所有网盘" 按钮（POST /admin/api/jobs/nightly/run → TriggerNow）。
 	app.nightlyRunner = nightly.New(nightly.Config{
 		Settings:              cat,
 		CronHour:              cfg.Nightly.CronHour,
@@ -255,7 +277,7 @@ type App struct {
 	spider91Migrator *spider91migrate.Migrator
 
 	// nightlyRunner 是凌晨流水线调度器：每天 cron_hour 串行跑扫盘 → 91 爬虫 → 迁移。
-	// 也响应 admin 「立即跑全流程」按钮（TriggerNow）。
+	// 也响应 admin 「扫描所有网盘」按钮（TriggerNow）。
 	nightlyRunner *nightly.Runner
 
 	// scanGlobalMu 串行化所有云盘扫盘任务，确保同一时刻全系统只有一个扫盘

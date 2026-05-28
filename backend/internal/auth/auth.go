@@ -30,6 +30,7 @@ type Authenticator struct {
 	Catalog  *catalog.Catalog
 	Now      func() time.Time
 
+	credMu   sync.RWMutex
 	mu       sync.Mutex
 	failures map[string]loginFailure
 }
@@ -40,6 +41,7 @@ type loginFailure struct {
 }
 
 func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, user, pass string) (bool, error) {
+	expectedUser, expectedPass := a.Credentials()
 	ip := clientIP(r)
 	if ip != "" {
 		banned, err := a.Catalog.IsLoginIPBanned(r.Context(), ip)
@@ -50,8 +52,8 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, user, pass
 			return false, ErrLoginIPBanned
 		}
 	}
-	if subtle.ConstantTimeCompare([]byte(user), []byte(a.Username)) != 1 ||
-		subtle.ConstantTimeCompare([]byte(pass), []byte(a.Password)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(user), []byte(expectedUser)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(pass), []byte(expectedPass)) != 1 {
 		if ip != "" {
 			if err := a.recordFailure(r, ip); err != nil {
 				return false, err
@@ -78,6 +80,19 @@ func (a *Authenticator) Login(w http.ResponseWriter, r *http.Request, user, pass
 		Expires:  time.Now().Add(sessionTTL),
 	})
 	return true, nil
+}
+
+func (a *Authenticator) Credentials() (string, string) {
+	a.credMu.RLock()
+	defer a.credMu.RUnlock()
+	return a.Username, a.Password
+}
+
+func (a *Authenticator) SetCredentials(username, password string) {
+	a.credMu.Lock()
+	defer a.credMu.Unlock()
+	a.Username = username
+	a.Password = password
 }
 
 func (a *Authenticator) recordFailure(r *http.Request, ip string) error {

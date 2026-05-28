@@ -1,12 +1,19 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	DefaultAdminUsername = "admin"
+	DefaultAdminPassword = "admin123"
 )
 
 type Config struct {
@@ -34,6 +41,129 @@ type Admin struct {
 	Password string `yaml:"password"`
 }
 
+func RequiresAdminSetup(c *Config) bool {
+	if c == nil {
+		return true
+	}
+	username := strings.TrimSpace(c.Server.Admin.Username)
+	password := c.Server.Admin.Password
+	if username == "" || password == "" {
+		return true
+	}
+	return username == DefaultAdminUsername && password == DefaultAdminPassword
+}
+
+func WriteAdminCredentials(path, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("username is required")
+	}
+	if password == "" {
+		return fmt.Errorf("password is required")
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(b, &root); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	doc := ensureDocumentMapping(&root)
+	server := ensureMappingValue(doc, "server")
+	admin := ensureMappingValue(server, "admin")
+	setScalarValue(admin, "username", username)
+	setScalarValue(admin, "password", password)
+
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err := enc.Encode(&root); err != nil {
+		_ = enc.Close()
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+
+	mode := os.FileMode(0o644)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out.Bytes(), mode); err != nil {
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
+}
+
+func ensureDocumentMapping(root *yaml.Node) *yaml.Node {
+	if root.Kind == 0 {
+		root.Kind = yaml.DocumentNode
+		root.Content = []*yaml.Node{{Kind: yaml.MappingNode}}
+	}
+	if root.Kind != yaml.DocumentNode {
+		clone := *root
+		root.Kind = yaml.DocumentNode
+		root.Content = []*yaml.Node{&clone}
+	}
+	if len(root.Content) == 0 || root.Content[0] == nil {
+		root.Content = []*yaml.Node{{Kind: yaml.MappingNode}}
+	}
+	if root.Content[0].Kind != yaml.MappingNode {
+		root.Content[0].Kind = yaml.MappingNode
+		root.Content[0].Content = nil
+	}
+	return root.Content[0]
+}
+
+func ensureMappingValue(parent *yaml.Node, key string) *yaml.Node {
+	if parent.Kind != yaml.MappingNode {
+		parent.Kind = yaml.MappingNode
+		parent.Content = nil
+	}
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key {
+			if parent.Content[i+1].Kind != yaml.MappingNode {
+				parent.Content[i+1].Kind = yaml.MappingNode
+				parent.Content[i+1].Content = nil
+			}
+			return parent.Content[i+1]
+		}
+	}
+	value := &yaml.Node{Kind: yaml.MappingNode}
+	parent.Content = append(parent.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		value,
+	)
+	return value
+}
+
+func setScalarValue(parent *yaml.Node, key, value string) {
+	if parent.Kind != yaml.MappingNode {
+		parent.Kind = yaml.MappingNode
+		parent.Content = nil
+	}
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key {
+			parent.Content[i+1].Kind = yaml.ScalarNode
+			parent.Content[i+1].Tag = "!!str"
+			parent.Content[i+1].Value = value
+			parent.Content[i+1].Content = nil
+			return
+		}
+	}
+	parent.Content = append(parent.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+	)
+}
+
 type Storage struct {
 	DBPath          string `yaml:"db_path"`
 	LocalPreviewDir string `yaml:"local_preview_dir"`
@@ -59,7 +189,7 @@ type Preview struct {
 // Nightly 是凌晨流水线（扫盘 → 91 爬虫 → 迁移）的调度配置。
 //
 // 一个进程只跑一条 nightly 流水线；该 cron 时间到达且当天还没跑过时触发，
-// 也可被管理后台「立即跑全流程」按钮手动触发。MaxDuration 是软超时，超过
+// 也可被管理后台「扫描所有网盘」按钮手动触发。MaxDuration 是软超时，超过
 // 后当前 phase 完成、后续 phase 不再启动。
 type Nightly struct {
 	// CronHour 是每日触发整点（0–23）；默认 1 表示 01:00。

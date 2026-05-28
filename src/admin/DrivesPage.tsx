@@ -18,6 +18,7 @@ import * as api from "./api";
 import { useToast } from "./ToastContext";
 import { Modal } from "./Modal";
 import { formatBytes } from "./storageFormat";
+import { makeUniqueDriveId } from "./driveId";
 
 const kindLabel: Record<string, string> = {
   quark: "夸克网盘",
@@ -31,6 +32,10 @@ const kindLabel: Record<string, string> = {
 type Kind = api.AdminDrive["kind"];
 
 type FormState = {
+  /**
+   * 内部稳定标识。编辑现有网盘时由后端数据填入；新建时不展示给用户，
+   * 保存前根据名称和类型自动生成。
+   */
   id: string;
   kind: Kind;
   name: string;
@@ -50,7 +55,7 @@ type FormState = {
 
 const emptyForm: FormState = {
   id: "",
-  kind: "quark",
+  kind: "p115",
   name: "",
   rootId: "0",
   scanRootId: "0",
@@ -143,17 +148,22 @@ export function DrivesPage() {
   }
 
   async function handleSave() {
-    if (!form.id || !form.kind) {
-      show("请填 ID 和类型", "error");
+    const name = form.name.trim();
+    if (!name || !form.kind) {
+      show("请填名称和类型", "error");
       return;
     }
+    const existing = list.find((x) => x.id === form.id);
+    const driveID = existing
+      ? form.id
+      : makeUniqueDriveId(form.kind, name, list);
     // 若编辑且没有提供凭证，提示一下但仍允许保存（不改凭证）
     setSaving(true);
     try {
       const resp = await api.upsertDrive({
-        id: form.id,
+        id: driveID,
         kind: form.kind,
-        name: form.name || form.id,
+        name,
         rootId: form.rootId || defaultRootId(form.kind),
         scanRootId: form.scanRootId || form.rootId || defaultRootId(form.kind),
         credentials: form.creds,
@@ -227,7 +237,7 @@ export function DrivesPage() {
   async function handleRunNightly() {
     try {
       await api.runNightlyJob();
-      show("已触发完整流水线（扫盘 → 91 爬虫 → 迁移），耗时较长，可在 backend 日志观察进度", "success");
+      show("已触发扫描所有网盘，耗时较长，可在 backend 日志观察进度", "success");
     } catch (e) {
       show(e instanceof Error ? e.message : "触发失败", "error");
     }
@@ -388,7 +398,7 @@ export function DrivesPage() {
                   )}
                 </button>
                 <button className="admin-btn" onClick={() => openEdit(d)}>
-                  编辑配置凭证
+                  {d.kind === "spider91" ? "编辑配置" : "编辑配置凭证"}
                 </button>
                 <button className="admin-btn is-danger" onClick={() => {
                   handleDelete(d);
@@ -560,9 +570,9 @@ export function DrivesPage() {
             type="button"
             className="admin-btn"
             onClick={handleRunNightly}
-            title="立即跑一次完整流水线：扫所有云盘 → 91 爬虫 → spider91 视频迁移到云盘。耗时较长，期间不要重复触发。"
+            title="立即扫描所有网盘。耗时较长，期间不要重复触发。"
           >
-            <PlayCircle size={14} /> 立即跑全流程
+            <PlayCircle size={14} /> 扫描所有网盘
           </button>
           <button className="admin-btn is-primary" onClick={openCreate}>
             <Plus size={14} /> 新建网盘
@@ -826,6 +836,7 @@ function DriveForm({
   uploadTargets: api.AdminDrive[];
 }) {
   const fields = useMemo(() => credentialFields(form.kind), [form.kind]);
+  const help = credentialHelp(form.kind, isEdit);
 
   function set<K extends keyof FormState>(k: K, v: FormState[K]) {
     onChange({ ...form, [k]: v });
@@ -846,17 +857,7 @@ function DriveForm({
   return (
     <div className="admin-form">
       <div className="admin-form__row">
-        <label>ID（英文，唯一）</label>
-        <input
-          value={form.id}
-          onChange={(e) => set("id", e.target.value)}
-          placeholder="例如 my-quark"
-          disabled={isEdit}
-        />
-        {isEdit && <div className="admin-form__help">已创建的盘 ID 不能修改</div>}
-      </div>
-      <div className="admin-form__row">
-        <label>名称</label>
+        <label>名称 *</label>
         <input
           value={form.name}
           onChange={(e) => set("name", e.target.value)}
@@ -870,12 +871,12 @@ function DriveForm({
           onChange={(e) => setKind(e.target.value as Kind)}
           disabled={isEdit}
         >
-          <option value="quark">夸克网盘</option>
           <option value="p115">115 网盘</option>
           <option value="pikpak">PikPak</option>
+          <option value="spider91">91 爬虫</option>
+          <option value="quark">夸克网盘</option>
           <option value="wopan">联通沃盘</option>
           <option value="onedrive">OneDrive</option>
-          <option value="spider91">91 爬虫</option>
         </select>
       </div>
       {form.kind !== "spider91" && (
@@ -902,31 +903,37 @@ function DriveForm({
         </>
       )}
 
-      <hr className="admin-form__divider" />
+      {(help || fields.length > 0) && (
+        <>
+          <hr className="admin-form__divider" />
 
-      <div className="admin-form__help admin-form__help--lead">
-        {credentialHelp(form.kind, isEdit)}
-      </div>
-
-      {fields.map((f) => (
-        <div key={f.key} className="admin-form__row">
-          <label>{f.label}{f.required && " *"}</label>
-          {f.multiline ? (
-            <textarea
-              value={form.creds[f.key] ?? ""}
-              onChange={(e) => setCred(f.key, e.target.value)}
-              placeholder={f.placeholder}
-            />
-          ) : (
-            <input
-              value={form.creds[f.key] ?? ""}
-              onChange={(e) => setCred(f.key, e.target.value)}
-              placeholder={f.placeholder}
-            />
+          {help && (
+            <div className="admin-form__help admin-form__help--lead">
+              {help}
+            </div>
           )}
-          {f.help && <div className="admin-form__help">{f.help}</div>}
-        </div>
-      ))}
+
+          {fields.map((f) => (
+            <div key={f.key} className="admin-form__row">
+              <label>{f.label}{f.required && " *"}</label>
+              {f.multiline ? (
+                <textarea
+                  value={form.creds[f.key] ?? ""}
+                  onChange={(e) => setCred(f.key, e.target.value)}
+                  placeholder={f.placeholder}
+                />
+              ) : (
+                <input
+                  value={form.creds[f.key] ?? ""}
+                  onChange={(e) => setCred(f.key, e.target.value)}
+                  placeholder={f.placeholder}
+                />
+              )}
+              {f.help && <div className="admin-form__help">{f.help}</div>}
+            </div>
+          ))}
+        </>
+      )}
 
       {form.kind === "spider91" && (
         <>
@@ -988,8 +995,7 @@ function Spider91UploadTargetField({
             <option value="">（请先添加 {presentLabel}）</option>
           </select>
           <div className="admin-form__help">
-            spider91 爬下来的视频会保留在本地最近 15 个，更旧的会自动上传到选定的云盘。
-            目前系统里还没有 {presentLabel} drive，可以先把 spider91 保存好；之后再回来挂一个目标盘。
+            目前系统里还没有 {presentLabel} drive。可以先保存 91 爬虫，之后再回来选择上传目标。
           </div>
         </>
       ) : (
@@ -1003,8 +1009,7 @@ function Spider91UploadTargetField({
             ))}
           </select>
           <div className="admin-form__help">
-            选定后，spider91 视频会被周期性上传到该云盘对应的根目录。
-            该设置全局生效；
+            爬取后的旧视频会上传到该云盘根目录。该设置全局生效；
             {uploadTargets.length > 1
               ? `如果同时挂着多个 ${presentLabel} drive，"自动"模式不会工作，必须显式选定一个。`
               : `当前只挂着 1 个 ${presentLabel}，"自动"模式会直接选用它。`}
@@ -1029,7 +1034,7 @@ function credentialHelp(kind: Kind, isEdit: boolean): string {
     case "onedrive":
       return `按 OpenList 默认方式，通过 api.oplist.org 在线刷新 token。只需要 refresh_token；保存后会自动回写新的 access_token / refresh_token。${note}`;
     case "spider91":
-      return `91 爬虫源：每天凌晨自动跑 91VideoSpider/spider_91porn.py，从本月最热第 1 页起翻页，遇到已爬过的 viewkey 自动跳过，凑够 target_new（默认 15）个新视频后停止。需要服务器装好 python3 + requests + beautifulsoup4 + lxml。${note}`;
+      return "91 爬虫会把定时抓取到的视频和封面先保存到本机，并作为一个视频来源接入站点；它不是外部网盘，不需要填写 Cookie 或目录 ID。后续流水线会把较早的视频上传到你选择的 115 / PikPak 目标盘。";
     default:
       return "";
   }
@@ -1166,38 +1171,7 @@ function credentialFields(kind: Kind): Array<{
         },
       ];
     case "spider91":
-      return [
-        {
-          key: "target_new",
-          label: "每次爬取的新视频数",
-          placeholder: "15",
-          help: "默认 15。从 91porn 本月最热第 1 页起翻页，遇到已爬过的 viewkey 自动跳过，凑够这么多个新视频后停止。",
-        },
-        {
-          key: "crawl_hour",
-          label: "凌晨触发的小时（0-23）",
-          placeholder: "0",
-          help: "默认 0，即在 00:00-00:59 之间触发。距离上次成功爬取至少 12 小时才会再触发。",
-        },
-        {
-          key: "proxy",
-          label: "下载代理（可选）",
-          placeholder: "留空则使用 HTTPS_PROXY 环境变量",
-          help: "91porn CDN 在海外，国内服务器直连通常很慢。可填 http://127.0.0.1:7890 这样的本地代理；留空则自动读 backend 进程的 HTTPS_PROXY 环境变量。",
-        },
-        {
-          key: "python_path",
-          label: "python 可执行文件",
-          placeholder: "python3",
-          help: "默认 python3；可填绝对路径，例如 /usr/bin/python3 或 conda 环境路径。",
-        },
-        {
-          key: "script_path",
-          label: "spider_91porn.py 路径（可选）",
-          placeholder: "留空自动定位 91VideoSpider/spider_91porn.py",
-          help: "服务启动时会从 backend/ 的父目录推断。如果脚本被你挪到了别处，请填绝对路径。",
-        },
-      ];
+      return [];
   }
 }
 

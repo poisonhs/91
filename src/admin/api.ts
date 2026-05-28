@@ -42,6 +42,17 @@ export function login(username: string, password: string) {
   });
 }
 
+export function setupStatus() {
+  return request<{ required: boolean }>("/setup");
+}
+
+export function setupAdmin(username: string, password: string) {
+  return request<{ ok: boolean }>("/setup", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+}
+
 export function logout() {
   return request<{ ok: boolean }>("/logout", { method: "POST" });
 }

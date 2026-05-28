@@ -65,7 +65,7 @@ go run ./cmd/server
 - `data/video-site.db`
 - `data/previews/`
 
-默认监听 `127.0.0.1:9192`，默认管理员 `admin / admin123`（务必在 `config.yaml` 里改）。如果本地已有旧的 `config.yaml`，请确认 `server.listen` 与前端代理端口一致。
+默认监听 `127.0.0.1:9192`。首次部署如果仍是默认管理员配置，登录页会要求先设置用户名和密码，并写回 `config.yaml`。如果本地已有旧的 `config.yaml`，请确认 `server.listen` 与前端代理端口一致。
 
 ### 连接前端
 
@@ -83,7 +83,7 @@ go run ./cmd/server 后端 9192
 
 也可以直接调用后端接口：
 
-1. 登录管理后台：`POST /admin/api/login` body `{"username":"admin","password":"admin123"}`
+1. 先在浏览器访问 `/login` 完成首次管理员设置，或使用已有管理员账号登录：`POST /admin/api/login`
 2. 新建盘：`POST /admin/api/drives`
    ```json
    {

@@ -2,7 +2,8 @@
 server:
   # 本地开发默认配合 vite.config.ts 的代理端口。
   listen: "127.0.0.1:9192"
-  # 管理后台用户，生产环境请务必修改
+  # 管理后台用户。保留默认值时，首次访问登录页会要求设置新用户名和密码，
+  # 并写回 backend/config.yaml。
   admin:
     username: "admin"
     password: "admin123"

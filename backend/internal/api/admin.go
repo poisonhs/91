@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -17,6 +18,10 @@ import (
 type AdminServer struct {
 	Catalog *catalog.Catalog
 	Auth    *auth.Authenticator
+	// SetupRequired 表示当前是否仍处于首次部署初始化状态。
+	SetupRequired func() bool
+	// OnSetup 持久化首次部署时设置的管理员账号密码，并更新运行中认证器。
+	OnSetup func(username, password string) error
 	// LocalPreviewDir is the local directory that stores generated teasers and thumbs.
 	LocalPreviewDir string
 	// Hooks：外层注入实际执行者
@@ -69,7 +74,9 @@ type DriveGenerationStatuses struct {
 
 func (a *AdminServer) Register(r chi.Router) {
 	r.Route("/admin/api", func(r chi.Router) {
-		// 登录、登出不需要鉴权
+		// 登录、登出和首次部署初始化不需要鉴权
+		r.Get("/setup", a.handleSetupStatus)
+		r.Post("/setup", a.handleSetup)
 		r.Post("/login", a.handleLogin)
 		r.Post("/logout", a.handleLogout)
 		r.Get("/me", a.handleMe)
@@ -115,7 +122,69 @@ type loginReq struct {
 	Password string `json:"password"`
 }
 
+type setupReq struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (a *AdminServer) setupRequired() bool {
+	return a.SetupRequired != nil && a.SetupRequired()
+}
+
+func (a *AdminServer) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"required": a.setupRequired()})
+}
+
+func (a *AdminServer) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if !a.setupRequired() {
+		http.Error(w, "setup already completed", http.StatusConflict)
+		return
+	}
+	if a.OnSetup == nil || a.Auth == nil {
+		http.Error(w, "setup is not available", http.StatusInternalServerError)
+		return
+	}
+	var body setupReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	username := strings.TrimSpace(body.Username)
+	password := body.Password
+	if username == "" {
+		http.Error(w, "username is required", http.StatusBadRequest)
+		return
+	}
+	if len(password) < 6 {
+		http.Error(w, "password must be at least 6 characters", http.StatusBadRequest)
+		return
+	}
+	if err := a.OnSetup(username, password); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	ok, err := a.Auth.Login(w, r, username, password)
+	if err != nil {
+		if errors.Is(err, auth.ErrLoginIPBanned) {
+			http.Error(w, "ip banned", http.StatusForbidden)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		http.Error(w, "setup completed but login failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (a *AdminServer) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if a.setupRequired() {
+		http.Error(w, "setup required", http.StatusPreconditionRequired)
+		return
+	}
 	var body loginReq
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
