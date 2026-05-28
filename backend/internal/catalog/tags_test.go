@@ -70,6 +70,56 @@ func TestCreateTagAndClassifyAddsTagToMatchingExistingVideos(t *testing.T) {
 	}
 }
 
+func TestOpenClassifiesSystemTagsForExistingVideos(t *testing.T) {
+	path := t.TempDir() + "/catalog.db"
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := db.Exec(`
+INSERT INTO videos (id, drive_id, file_id, title, tags, tags_manual, published_at, created_at, updated_at)
+VALUES
+	('video-auto', 'drive', 'file-auto', '巨乳后入合集', '[]', 0, ?, ?, ?),
+	('video-manual', 'drive', 'file-manual', '巨乳后入合集', '[]', 1, ?, ?, ?)`,
+		now, now, now, now, now, now); err != nil {
+		t.Fatalf("seed videos: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	ctx := context.Background()
+	cat, err := Open(path)
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+
+	got, err := cat.GetVideo(ctx, "video-auto")
+	if err != nil {
+		t.Fatalf("get auto video: %v", err)
+	}
+	if !sameStrings(got.Tags, []string{"后入", "奶子"}) {
+		t.Fatalf("auto tags = %#v, want 后入/奶子", got.Tags)
+	}
+
+	manual, err := cat.GetVideo(ctx, "video-manual")
+	if err != nil {
+		t.Fatalf("get manual video: %v", err)
+	}
+	if len(manual.Tags) != 0 {
+		t.Fatalf("manual tags = %#v, want unchanged", manual.Tags)
+	}
+}
+
 func TestOpenMigratesLegacyVideosWithoutFileName(t *testing.T) {
 	path := t.TempDir() + "/catalog.db"
 	db, err := sql.Open("sqlite", path)
@@ -543,7 +593,6 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
-
 // 删除 collection 标签的最后一个引用视频后，标签应当自动从 tags 表里消失。
 // user/system 标签不受影响：用户/系统标签的语义由人维护，孤儿状态保留。
 func TestDeleteVideoPrunesOrphanCollectionTag(t *testing.T) {
@@ -720,7 +769,6 @@ func TestMigratePrunesPreexistingOrphanCollectionTags(t *testing.T) {
 	}
 }
 
-
 // TestReconcileThumbnailStatusOnce 检查升级时的"url 已写但 status=pending"修复。
 // catalog.Open 会自动跑这个 migration（调用链 Open→ensureSchema→reconcileThumbnailStatusOnce）。
 // 因此这里通过手动写脏数据 + 直接调 reconcile 来验证；脏数据是"绕过 Open
@@ -738,11 +786,11 @@ func TestReconcileThumbnailStatusOnce(t *testing.T) {
 		id, url, status string
 		wantStatus      string
 	}{
-		{"v-pending-url", "/p/thumb/v-pending-url", "pending", "ready"}, // 主要修复目标
-		{"v-empty-url-pending", "", "pending", "pending"},                // 没 url 不动
+		{"v-pending-url", "/p/thumb/v-pending-url", "pending", "ready"},         // 主要修复目标
+		{"v-empty-url-pending", "", "pending", "pending"},                       // 没 url 不动
 		{"v-failed-with-url", "/p/thumb/v-failed-with-url", "failed", "failed"}, // 显式失败保留
-		{"v-empty-url-failed", "", "failed", "failed"},                   // 失败 + 没 url 也保留
-		{"v-already-ready", "/p/thumb/v-already-ready", "ready", "ready"}, // 幂等
+		{"v-empty-url-failed", "", "failed", "failed"},                          // 失败 + 没 url 也保留
+		{"v-already-ready", "/p/thumb/v-already-ready", "ready", "ready"},       // 幂等
 	}
 	for _, c := range cases {
 		if err := cat.UpsertVideo(ctx, &Video{
@@ -804,7 +852,6 @@ func TestReconcileThumbnailStatusOnce(t *testing.T) {
 		t.Errorf("second-call status = %q, want pending (migration should be no-op after marker)", status)
 	}
 }
-
 
 // TestUpsertVideoSyncsThumbnailStatus 验证 scanner 创建/补回视频时
 // thumbnail_status 跟随 thumbnail_url 自动设。这是历史 bug 的修复回归测试 ——

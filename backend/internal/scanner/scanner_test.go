@@ -36,7 +36,7 @@ func TestRunPersistsRemoteThumbnailFromDriveEntry(t *testing.T) {
 			ThumbnailURL: "https://thumbnail.example/clip.jpg",
 		}},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 
 	stats, err := sc.Run(ctx, "")
 	if err != nil {
@@ -76,7 +76,7 @@ func TestRunIgnoresZeroSizeVideoFiles(t *testing.T) {
 			ModTime:  time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC),
 		}},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 
 	stats, err := sc.Run(ctx, "")
 	if err != nil {
@@ -126,7 +126,7 @@ func TestRunBackfillsRemoteThumbnailForExistingVideo(t *testing.T) {
 			ThumbnailURL: "https://thumbnail.example/backfilled.jpg",
 		}},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 
 	stats, err := sc.Run(ctx, "")
 	if err != nil {
@@ -180,7 +180,7 @@ func TestRunReplacesExistingVideoTagsWithFixedFilenameTags(t *testing.T) {
 			ModTime: now,
 		}},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 
 	if _, err := sc.Run(ctx, ""); err != nil {
 		t.Fatalf("scan: %v", err)
@@ -239,7 +239,7 @@ func TestRunAddsShortCollectionDirectoryAsTag(t *testing.T) {
 			}},
 		},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 
 	if _, err := sc.Run(ctx, ""); err != nil {
 		t.Fatalf("scan: %v", err)
@@ -297,7 +297,7 @@ func TestRunMapsAVCodeDirectoryToAVTag(t *testing.T) {
 			}},
 		},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 
 	if _, err := sc.Run(ctx, ""); err != nil {
 		t.Fatalf("scan: %v", err)
@@ -344,7 +344,7 @@ func TestRunSkipsDuplicateFileHashes(t *testing.T) {
 		},
 	}
 	addedIDs := []string{}
-	sc := New(cat, drv, []string{".mp4"}, 5, func(v *catalog.Video) {
+	sc := New(cat, drv, []string{".mp4"}, nil, func(v *catalog.Video) {
 		addedIDs = append(addedIDs, v.ID)
 	})
 
@@ -407,7 +407,7 @@ func TestRunSkipsDuplicateFileNamesWithSameSizeWhenHashesMissing(t *testing.T) {
 		},
 	}
 	addedIDs := []string{}
-	sc := New(cat, drv, []string{".mp4"}, 5, func(v *catalog.Video) {
+	sc := New(cat, drv, []string{".mp4"}, nil, func(v *catalog.Video) {
 		addedIDs = append(addedIDs, v.ID)
 	})
 
@@ -452,7 +452,7 @@ func TestRunReportsSeenVideoFileIDsAndVisitedDirectories(t *testing.T) {
 			},
 		},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 
 	stats, err := sc.Run(ctx, "")
 	if err != nil {
@@ -482,7 +482,7 @@ func TestRunReportsSeenVideoFileIDsAndVisitedDirectories(t *testing.T) {
 	}
 }
 
-func TestRunExcludesP115MoviesDirectoryFromStatsAndCatalog(t *testing.T) {
+func TestRunSkipsConfiguredDirIDsAndDoesNotRecurse(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
 	if err != nil {
@@ -499,19 +499,21 @@ func TestRunExcludesP115MoviesDirectoryFromStatsAndCatalog(t *testing.T) {
 		id:   "115",
 		entries: map[string][]drives.Entry{
 			"root": {
-				{ID: "movies-dir", Name: "影视", IsDir: true},
+				{ID: "skip-dir", Name: "Movies", IsDir: true},
 				{ID: "normal-file", Name: "normal.mp4", Size: 123},
 			},
-			"movies-dir": {
-				{ID: "movie-file", ParentID: "movies-dir", Name: "movie.mp4", Size: 456},
+			"skip-dir": {
+				{ID: "skipped-file", ParentID: "skip-dir", Name: "skipped.mp4", Size: 456},
 				{ID: "nested-dir", Name: "Nested", IsDir: true},
 			},
 			"nested-dir": {
-				{ID: "nested-movie-file", ParentID: "nested-dir", Name: "nested.mp4", Size: 789},
+				{ID: "nested-skipped-file", ParentID: "nested-dir", Name: "nested.mp4", Size: 789},
 			},
 		},
 	}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	// 把 skip-dir 加入 SkipDirIDs：scanner 应该完全不进该目录，
+	// 也不会递归到其下的 nested-dir。
+	sc := New(cat, drv, []string{".mp4"}, []string{"skip-dir"}, nil)
 
 	stats, err := sc.Run(ctx, "")
 	if err != nil {
@@ -519,25 +521,76 @@ func TestRunExcludesP115MoviesDirectoryFromStatsAndCatalog(t *testing.T) {
 	}
 
 	if stats.Scanned != 1 {
-		t.Fatalf("scanned = %d, want only non-excluded file counted", stats.Scanned)
+		t.Fatalf("scanned = %d, want only non-skipped file counted", stats.Scanned)
 	}
 	if stats.Added != 1 {
-		t.Fatalf("added = %d, want only non-excluded file added", stats.Added)
+		t.Fatalf("added = %d, want only non-skipped file added", stats.Added)
 	}
-	if _, ok := stats.ExcludedFileIDs["movie-file"]; !ok {
-		t.Fatalf("excluded file ids = %#v, want movie-file", stats.ExcludedFileIDs)
+	// skip-dir 自身和它下面的目录 / 文件都不应被访问。
+	if _, ok := stats.VisitedDirIDs["skip-dir"]; ok {
+		t.Fatalf("visited skipped dir, want no recursion into skip-dir")
 	}
-	if _, ok := stats.ExcludedFileIDs["nested-movie-file"]; !ok {
-		t.Fatalf("excluded file ids = %#v, want nested-movie-file", stats.ExcludedFileIDs)
+	if _, ok := stats.VisitedDirIDs["nested-dir"]; ok {
+		t.Fatalf("visited nested dir under skipped, want no descent")
 	}
-	if _, err := cat.GetVideo(ctx, "p115-115-movie-file"); err != sql.ErrNoRows {
-		t.Fatalf("excluded direct movie get error = %v, want sql.ErrNoRows", err)
+	if _, ok := stats.SeenFileIDs["skipped-file"]; ok {
+		t.Fatalf("seen skipped file, want skipped")
 	}
-	if _, err := cat.GetVideo(ctx, "p115-115-nested-movie-file"); err != sql.ErrNoRows {
-		t.Fatalf("excluded nested movie get error = %v, want sql.ErrNoRows", err)
+	if _, err := cat.GetVideo(ctx, "p115-115-skipped-file"); err != sql.ErrNoRows {
+		t.Fatalf("skipped direct file get error = %v, want sql.ErrNoRows", err)
+	}
+	if _, err := cat.GetVideo(ctx, "p115-115-nested-skipped-file"); err != sql.ErrNoRows {
+		t.Fatalf("nested skipped file get error = %v, want sql.ErrNoRows", err)
 	}
 	if _, err := cat.GetVideo(ctx, "p115-115-normal-file"); err != nil {
 		t.Fatalf("normal video was not added: %v", err)
+	}
+}
+
+// TestRunDoesNotEnforceLegacyMaxDepth 校验扫描会一直递归直到没有子目录，
+// 不再受旧的 max_depth 上限限制。构造 7 层嵌套（旧 default=5 时第 6+ 层会被截断），
+// 确保最深层的视频也能被入库。
+func TestRunDoesNotEnforceLegacyMaxDepth(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+
+	// scannerTreeFakeDrive.RootID() == "root"。
+	// 链接 root → d1 → d2 → ... → d7，叶子放一个视频。
+	const depth = 7
+	entries := map[string][]drives.Entry{}
+	dirs := []string{"root"}
+	for i := 1; i <= depth; i++ {
+		dirs = append(dirs, fmt.Sprintf("d%d", i))
+	}
+	for i := 0; i < depth; i++ {
+		entries[dirs[i]] = []drives.Entry{
+			{ID: dirs[i+1], Name: fmt.Sprintf("L%d", i+1), IsDir: true},
+		}
+	}
+	leaf := dirs[depth]
+	entries[leaf] = []drives.Entry{
+		{ID: "deep-file", ParentID: leaf, Name: "deep.mp4", Size: 10},
+	}
+	drv := &scannerTreeFakeDrive{entries: entries}
+
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
+	stats, err := sc.Run(ctx, "")
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if stats.Added != 1 {
+		t.Fatalf("added = %d, want 1 (deepest-leaf video reached)", stats.Added)
+	}
+	if _, err := cat.GetVideo(ctx, "fake-drive-deep-file"); err != nil {
+		t.Fatalf("deepest video not added (legacy max_depth still enforced?): %v", err)
 	}
 }
 
@@ -605,7 +658,6 @@ func (d *scannerTreeFakeDrive) EnsureDir(context.Context, string) (string, error
 }
 func (d *scannerTreeFakeDrive) RootID() string { return "root" }
 
-
 // captureLog 把 log 包默认输出引到一个 bytes.Buffer，便于断言进度日志被打印；
 // 测试结束自动恢复。
 func captureLog(t *testing.T) *strings.Builder {
@@ -642,7 +694,7 @@ func TestScannerProgressHeartbeatEmits(t *testing.T) {
 	}
 	drv := &scannerFakeDrive{entries: entries}
 
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 	// 极短间隔，确保至少一次 heartbeat 在 walk 内被触发
 	sc.ProgressInterval = 1 * time.Microsecond
 
@@ -668,7 +720,7 @@ func TestScannerProgressHeartbeatDisabled(t *testing.T) {
 	drv := &scannerFakeDrive{entries: []drives.Entry{
 		{ID: "f-1", Name: "x.mp4", Size: 1, ModTime: time.Now()},
 	}}
-	sc := New(cat, drv, []string{".mp4"}, 5, nil)
+	sc := New(cat, drv, []string{".mp4"}, nil, nil)
 	sc.ProgressInterval = -1 // 显式关闭
 
 	buf := captureLog(t)

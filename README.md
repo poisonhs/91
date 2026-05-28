@@ -20,7 +20,7 @@
 - 视频管理支持按网盘筛选、每页 100 条分页、每个网盘的 Teaser 已生成/待生成/失败统计、单条或全量重生 teaser、编辑标题/作者/分类/标签等元数据。
 - 标签管理支持创建标签并自动分类已有视频；内置规则会把常见番号污染归并到 `AV` 等系统标签，降低标签列表噪声。
 - 115 生成 teaser 时会顺序取链并分段生成，降低 CDN 403 / WAF 风控导致的大量失败概率；遇到疑似风控会进入冷却并保留任务为 `pending`。
-- 115 扫描会跳过名为 `影视` 的目录及其全部子目录文件；这些文件不会新增到目录、不会计入扫描统计，已入库的同源文件会在后续扫描中清理。
+- 网盘扫描支持**用户配置的"跳过目录"**：在 `/admin/drives` → 网盘行的「跳过目录」按钮里树形浏览网盘，勾选要跳过的目录，保存后下次扫描时这些目录及其全部子目录都不会被递归。**没有目录深度上限**，扫描会一直递归到没有子目录为止。早期 115 硬编码跳过名为「影视」的目录的特例分支已被替换为通用的"用户可选跳过目录"机制。
 
 ## 前端 UI
 
@@ -258,7 +258,8 @@ git add vendor/      # 入库
 - **取流优先用移动端下载接口**，失败再回退到原 chrome 下载接口（仅影响 backend 内部取链阶段，比如 ffmpeg 抽 teaser 时）。
 - **生成 teaser** 不再让 ffmpeg 同时打开多个 115 直链；每个 3 秒片段单独取链、单独生成本地小片段，最后在本地 concat。
 - **ffmpeg 访问 115 CDN** 会经过进程内本地代理转发 Range 请求，避免直接暴露签名 URL，并统一处理必要请求头。
-- 如果 115 返回 403 / 405 / WAF 阻断 / `moov atom not found` / `partial file` 等疑似临时风控错误，当前网盘的封面/teaser worker 会进入默认 5 分钟冷却，当前任务保持 `pending`，避免继续请求导致更多失败。
+- **扫描列目录的限频冷却**：115 列目录返回 `405 / 429 / WAF 阻断 / 安全威胁 / unexpected error` 等疑似限频错误时，当前 drive 的列目录会冷却 **10 分钟**后重试；如果再次命中限频继续冷却 10 分钟（无重试上限，直到成功或 ctx 取消）。冷却期间该 drive 的 scanner 单线挂起；其它 drive 不受影响。
+- 如果 115 返回 403 / 405 / WAF 阻断 / `moov atom not found` / `partial file` 等疑似临时风控错误，当前网盘的封面/teaser worker 会进入默认 **5 分钟冷却**，到点后自动继续处理后续任务；当前命中限频的任务保持 `pending` 留待下一轮 nightly，避免反复请求加重风控。
 
 管理后台的"重生失败 teaser"会把 `failed` 重置为 `pending` 并入队。一次性重生大量 115 视频仍可能触发上游风控；建议点一次后观察日志，如果出现 `transient media source error until=...`，等待冷却结束再继续，不要反复点击。
 
@@ -387,7 +388,7 @@ backend/data/spider91/<driveID>/
 
 **关键属性**：
 
-- **6 小时软超时**：`nightly.max_duration` 控制单轮总耗时上限。到点时正在跑的 phase 跑完，后续 phase 不再启动 —— 不强 kill 任何 ffmpeg / 上传。
+- **不设总超时**：早期版本有 6 小时 `nightly.max_duration` 软超时，已移除。流水线会一直跑到所有 phase 完成，或进程被关停。yaml 里的 `nightly.max_duration` 字段保留仅为兼容旧配置，运行时被忽略。原因：单条 phase 内部的网盘风控冷却（115 列目录 10min × N、teaser 限频 5min）可能积累到很长时间，硬切到下一天反而把被中断的子任务延后到再下一晚。
 - **当天去重**：流水线启动后会把当天日期写入 `settings.nightly.last_run_date`；同一天 01:00 的下一次 tick 看到日期相同就跳过，进程崩溃 + 重启也不会重复跑。
 - **失败处理**：单个 drive 扫描失败、单条 teaser 生成失败、单条迁移失败都不会阻塞流水线；都通过日志可观测，下次流水线再试。teaser `failed` 状态需管理员手动「重生失败 teaser」恢复。
 - **每 drive 的 teaser 开关**：`drives.teaser_enabled` 字段在 Phase 1 / Phase 2 入队时被尊重；关闭时 teaser worker 不会被入队，封面仍然生成。
@@ -430,7 +431,7 @@ backend/data/spider91/<driveID>/
 ```bash
 npm run lint
 npm run build
-node --test tests/previewIntent.test.ts
+npm test                 # 跑所有 tests/*.test.ts（用 tsx 加载 TS）
 
 cd backend
 go test ./... -count=1

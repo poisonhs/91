@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ type AdminServer struct {
 	OnRegenPreview             func(videoID string)
 	OnRegenAllPreviews         func()
 	OnRegenFailedPreviews      func(driveID string)
+	OnRegenFailedThumbnails    func(driveID string)
 	GetDriveGenerationStatuses func() map[string]DriveGenerationStatuses
 	// OnTeaserEnabledChanged 在 per-drive teaser 开关被切换后调用。
 	// enabled=true 时上层应该重新把 pending teaser 入队（类似旧的全局开关从关到开）；
@@ -40,6 +42,17 @@ type AdminServer struct {
 	// Phase3 迁移）。立即返回 —— 实际任务在后台跑，admin 在日志或下次状态查询里
 	// 看进度。重复点击会被 Runner.TryLock 丢弃。
 	OnRunNightlyJob func()
+	// ListDriveDirChildren 列出某个 drive 在 parentID 目录下的直接子目录。
+	// parentID 为空时使用 drive 的 RootID。返回 (子目录列表, error)。
+	// 用于"设置跳过目录"弹窗按需展开浏览网盘目录树；只返回目录条目，文件忽略。
+	// 调用方应当处理 error 并以 5xx 返回前端。
+	ListDriveDirChildren func(ctx context.Context, driveID, parentID string) ([]DriveDirEntry, error)
+}
+
+// DriveDirEntry 是 dirtree 接口的一条返回项：网盘上的一个目录节点。
+type DriveDirEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type GenerationStatus struct {
@@ -72,7 +85,10 @@ func (a *AdminServer) Register(r chi.Router) {
 			r.Delete("/drives/{id}", a.handleDeleteDrive)
 			r.Post("/drives/{id}/rescan", a.handleRescan)
 			r.Post("/drives/{id}/teaser-enabled", a.handleSetDriveTeaserEnabled)
+			r.Post("/drives/{id}/skip-dirs", a.handleSetDriveSkipDirs)
+			r.Get("/drives/{id}/dirtree", a.handleListDriveDirTree)
 			r.Post("/drives/{id}/previews/failed/regenerate", a.handleRegenFailedPreviews)
+			r.Post("/drives/{id}/thumbnails/failed/regenerate", a.handleRegenFailedThumbnails)
 
 			// 视频
 			r.Get("/videos", a.handleAdminListVideos)
@@ -158,16 +174,20 @@ func (a *AdminServer) handleListDrives(w http.ResponseWriter, r *http.Request) {
 	}
 	// 出参不返回凭证明文，只告诉前端是否已配置
 	type out struct {
-		ID                        string           `json:"id"`
-		Kind                      string           `json:"kind"`
-		Name                      string           `json:"name"`
-		RootID                    string           `json:"rootId"`
-		ScanRootID                string           `json:"scanRootId"`
-		Status                    string           `json:"status"`
-		LastError                 string           `json:"lastError,omitempty"`
-		HasCredential             bool             `json:"hasCredential"`
+		ID            string `json:"id"`
+		Kind          string `json:"kind"`
+		Name          string `json:"name"`
+		RootID        string `json:"rootId"`
+		ScanRootID    string `json:"scanRootId"`
+		Status        string `json:"status"`
+		LastError     string `json:"lastError,omitempty"`
+		HasCredential bool   `json:"hasCredential"`
 		// TeaserEnabled 控制是否给本盘生成 teaser/封面。前端用它在网盘列表/编辑表单展示开关状态。
 		TeaserEnabled bool `json:"teaserEnabled"`
+		// SkipDirIDs 是用户在 admin 配置的"扫描跳过目录"集合（drive 侧目录 fileID）。
+		// 前端用它在"设置跳过目录"弹窗里回显已选项；JSON 字段名 camelCase 与
+		// catalog.Drive 保持一致。
+		SkipDirIDs []string `json:"skipDirIds"`
 		// LastCrawlAt 是 spider91 上次成功爬取的 unix 秒（来自 credentials.last_crawl_at）。
 		// 其它 kind 留 0；前端用它显示"上次抓取: N 小时前"。
 		LastCrawlAt               int64            `json:"lastCrawlAt,omitempty"`
@@ -218,6 +238,7 @@ func (a *AdminServer) handleListDrives(w http.ResponseWriter, r *http.Request) {
 			Status: d.Status, LastError: d.LastError,
 			HasCredential:             hasCred,
 			TeaserEnabled:             d.TeaserEnabled,
+			SkipDirIDs:                append([]string{}, d.SkipDirIDs...),
 			LastCrawlAt:               lastCrawlAt,
 			ThumbnailGenerationStatus: generation.Thumbnail,
 			PreviewGenerationStatus:   generation.Preview,
@@ -243,6 +264,10 @@ type upsertDriveReq struct {
 	// 用 *bool 区分 "未传" / "传了 false"：未传时表示客户端不打算改这个字段，
 	// 沿用 catalog 现有值；新建时未传一律默认开启（true）。
 	TeaserEnabled *bool `json:"teaserEnabled,omitempty"`
+	// SkipDirIDs 同样用指针区分 "未传"（沿用旧值）/ "传了空数组"（清空）。
+	// 推荐前端"设置跳过目录"走专用 POST /drives/{id}/skip-dirs；
+	// 这里支持是为了允许批量编辑场景一次性提交。
+	SkipDirIDs *[]string `json:"skipDirIds,omitempty"`
 }
 
 func (a *AdminServer) handleUpsertDrive(w http.ResponseWriter, r *http.Request) {
@@ -276,12 +301,25 @@ func (a *AdminServer) handleUpsertDrive(w http.ResponseWriter, r *http.Request) 
 		teaserEnabled = existing.TeaserEnabled
 	}
 
+	// skipDirIds 解析顺序：
+	//   1. 请求显式带了（包括空数组）→ 用请求值（空数组 = 清空）
+	//   2. 请求没带 + 编辑现有 drive → 沿用旧值
+	//   3. 请求没带 + 新建 drive → nil（不跳过任何目录）
+	var skipDirIDs []string
+	switch {
+	case body.SkipDirIDs != nil:
+		skipDirIDs = *body.SkipDirIDs
+	case existing != nil:
+		skipDirIDs = existing.SkipDirIDs
+	}
+
 	d := &catalog.Drive{
 		ID: body.ID, Kind: body.Kind, Name: body.Name,
 		RootID: body.RootID, ScanRootID: body.ScanRootID,
 		Credentials:   body.Credentials,
 		Status:        "disconnected",
 		TeaserEnabled: teaserEnabled,
+		SkipDirIDs:    skipDirIDs,
 	}
 	if err := a.Catalog.UpsertDrive(r.Context(), d); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -363,6 +401,87 @@ func (a *AdminServer) handleSetDriveTeaserEnabled(w http.ResponseWriter, r *http
 		a.OnTeaserEnabledChanged(id, body.Enabled)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "teaserEnabled": body.Enabled})
+}
+
+// skipDirsReq 是 POST /admin/api/drives/{id}/skip-dirs 的入参。
+//
+// 整体覆盖语义：传啥就保存啥（不是增量合并）。dirIds 可以是 nil/空数组 表示
+// 清空跳过列表。
+type skipDirsReq struct {
+	DirIDs []string `json:"dirIds"`
+}
+
+// handleSetDriveSkipDirs 更新某盘的"扫描跳过目录"集合。
+//
+// 与 upsertDrive 的区别：那条接口要重传 kind / name / rootId / credentials 等字段，
+// 用户保存跳过目录时不该牵连这些。所以单独走一条 PUT 风格接口。
+//
+// 行为：
+//   - 写 catalog.drives.skip_dir_ids（整体覆盖）
+//   - 不重新触发扫描；下次 nightly Phase 1 或 admin 手动重扫时生效
+//   - 返回保存后的列表，方便前端乐观更新但又能以服务端为准
+func (a *AdminServer) handleSetDriveSkipDirs(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	var body skipDirsReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	// 去重 + trim 空白；前端理论上保证清洁，这里再防一道。
+	seen := map[string]struct{}{}
+	cleaned := make([]string, 0, len(body.DirIDs))
+	for _, raw := range body.DirIDs {
+		s := raw
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		cleaned = append(cleaned, s)
+	}
+	if err := a.Catalog.SetDriveSkipDirIDs(r.Context(), id, cleaned); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "drive not found", http.StatusNotFound)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipDirIds": cleaned})
+}
+
+// handleListDriveDirTree 列出某 drive 在指定父目录下的直接子目录。
+//
+// 查询参数 ?parent=<dirID>：留空 = drive 的 RootID。前端按需展开调用 ——
+// 每展开一层调一次，避免一次性递归整个网盘（115 限频会很难受）。
+//
+// 错误：drive 未挂载 / List 失败 → 500，body 是错误文案；前端展示给用户。
+func (a *AdminServer) handleListDriveDirTree(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	if a.ListDriveDirChildren == nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("dirtree not configured"))
+		return
+	}
+	parent := r.URL.Query().Get("parent")
+	entries, err := a.ListDriveDirChildren(r.Context(), id, parent)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if entries == nil {
+		entries = []DriveDirEntry{}
+	}
+	writeJSON(w, http.StatusOK, entries)
 }
 
 func (a *AdminServer) handleAdminListVideos(w http.ResponseWriter, r *http.Request) {
@@ -512,6 +631,19 @@ func (a *AdminServer) handleRegenFailedPreviews(w http.ResponseWriter, r *http.R
 	id := chi.URLParam(r, "id")
 	if a.OnRegenFailedPreviews != nil {
 		a.OnRegenFailedPreviews(id)
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+}
+
+// handleRegenFailedThumbnails 触发某 drive 下所有 thumbnail_status=failed 的封面
+// 重新入队生成。和 handleRegenFailedPreviews 行为对称（一个管 teaser，一个管封面）。
+//
+// 立即返回 202；实际执行在后台 goroutine 跑，状态可在下次 GET /admin/api/drives
+// 的 thumbnailFailedCount / thumbnailGenerationStatus 看变化。
+func (a *AdminServer) handleRegenFailedThumbnails(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if a.OnRegenFailedThumbnails != nil {
+		a.OnRegenFailedThumbnails(id)
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 }

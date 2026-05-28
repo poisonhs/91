@@ -1,5 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
-import { Download, PlayCircle, Plus, Power, PowerOff, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Download,
+  FolderTree,
+  PlayCircle,
+  Plus,
+  Power,
+  PowerOff,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
+} from "lucide-react";
 import * as api from "./api";
 import { useToast } from "./ToastContext";
 import { Modal } from "./Modal";
@@ -53,8 +65,13 @@ export function DrivesPage() {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [saving, setSaving] = useState(false);
   const [regenFailedId, setRegenFailedId] = useState("");
+  // 与 regenFailedId 并列：失败封面重新入队按钮的 disable 状态。两套独立按钮 →
+  // 两个 state 互不阻塞，避免操作 teaser 时锁住封面那条按钮（反之亦然）。
+  const [regenFailedThumbId, setRegenFailedThumbId] = useState("");
   // togglingTeaserId 在请求未返回前禁用按钮，避免连点导致两次切换互相覆盖。
   const [togglingTeaserId, setTogglingTeaserId] = useState("");
+  // skipDirsTarget 非空时打开"设置跳过目录"弹窗，里头维护当前选中的 drive 引用。
+  const [skipDirsTarget, setSkipDirsTarget] = useState<api.AdminDrive | null>(null);
   const { show } = useToast();
 
   // 当前系统中可作为 spider91 上传目标的 drive 列表（pikpak ∪ p115）。
@@ -226,6 +243,20 @@ export function DrivesPage() {
     }
   }
 
+  // 失败封面图重生：与 handleRegenFailed 对称（一个管 teaser，一个管封面）。
+  async function handleRegenFailedThumbnails(d: api.AdminDrive) {
+    setRegenFailedThumbId(d.id);
+    try {
+      await api.regenFailedThumbnails(d.id);
+      show("已触发失败封面重新生成", "success");
+      refresh();
+    } catch (e) {
+      show(e instanceof Error ? e.message : "触发失败", "error");
+    } finally {
+      setRegenFailedThumbId("");
+    }
+  }
+
   async function handleToggleTeaser(d: api.AdminDrive) {
     const next = !d.teaserEnabled;
     setTogglingTeaserId(d.id);
@@ -387,6 +418,30 @@ export function DrivesPage() {
                       {regenFailedId === d.id ? "触发中..." : "重试失败 Teaser"}
                     </span>
                   </button>{" "}
+                  <button
+                    className="admin-btn"
+                    disabled={
+                      (d.thumbnailFailedCount ?? 0) <= 0 ||
+                      regenFailedThumbId === d.id
+                    }
+                    onClick={() => handleRegenFailedThumbnails(d)}
+                    title="把所有 thumbnail_status=failed 的封面重置为 pending 并重新入队生成"
+                  >
+                    <RotateCcw size={13} />
+                    <span className="admin-btn__label">
+                      {regenFailedThumbId === d.id ? "触发中..." : "重试失败封面"}
+                    </span>
+                  </button>{" "}
+                  <button
+                    className="admin-btn"
+                    onClick={() => setSkipDirsTarget(d)}
+                    title="设置扫描时要跳过的目录（命中即不递归）"
+                  >
+                    <FolderTree size={13} />
+                    <span className="admin-btn__label">
+                      跳过目录 {(d.skipDirIds?.length ?? 0) > 0 ? `(${d.skipDirIds.length})` : ""}
+                    </span>
+                  </button>{" "}
                   <button className="admin-btn" onClick={() => openEdit(d)}>
                     编辑
                   </button>{" "}
@@ -426,6 +481,24 @@ export function DrivesPage() {
           uploadTargets={uploadTargets}
         />
       </Modal>
+
+      {skipDirsTarget && (
+        <SkipDirsModal
+          drive={skipDirsTarget}
+          onClose={() => setSkipDirsTarget(null)}
+          onSaved={(saved) => {
+            setList((prev) =>
+              prev.map((item) =>
+                item.id === saved.id
+                  ? { ...item, skipDirIds: saved.skipDirIds }
+                  : item
+              )
+            );
+            setSkipDirsTarget(null);
+            show("已保存跳过目录，下次扫描生效", "success");
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -1022,4 +1095,344 @@ function formatRelativeTime(unixSeconds: number): string {
   } catch {
     return `${d} 天前`;
   }
+}
+
+// ---------- SkipDirsModal ----------
+//
+// "设置跳过目录"弹窗：
+// - 顶部说明 + 已选 chips（点 × 移除）
+// - 树形浏览器，按需展开（每展开一层调一次 listDriveDirChildren），勾选目录加入跳过集合
+// - 底部"保存"调 setDriveSkipDirIds 整体覆盖；"取消"丢弃改动
+//
+// 设计取舍：
+// - 不一次性递归整棵树。115 等慢盘列目录有限频，按需展开体验稳定也避免风控
+// - 选中的目录 ID 直接对应 catalog.drives.skip_dir_ids；不存路径，因为同名目录
+//   在不同父级下可能各自需要决定是否跳过，ID 是网盘侧的稳定句柄
+// - 已选集合显示在顶部 chips；树里被选中的目录用样式标出，用户在浏览中可以一眼
+//   看到自己选了什么
+// - 子目录的勾选不影响父目录的跳过判定（scanner 只按 ID 比对），但展示上加视觉
+//   线索：父目录被跳过 → 整个子树灰显（提示用户"已被祖先跳过"），仍可单独勾选
+type SkipDirsModalProps = {
+  drive: api.AdminDrive;
+  onClose: () => void;
+  onSaved: (saved: { id: string; skipDirIds: string[] }) => void;
+};
+
+function SkipDirsModal({ drive, onClose, onSaved }: SkipDirsModalProps) {
+  const { show } = useToast();
+  // selected 用 Set 方便 O(1) 增删 / contains 查询。
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(drive.skipDirIds ?? [])
+  );
+  const [saving, setSaving] = useState(false);
+
+  const toggle = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      const ids = Array.from(selected);
+      const resp = await api.setDriveSkipDirIds(drive.id, ids);
+      onSaved({ id: drive.id, skipDirIds: resp.skipDirIds });
+    } catch (e) {
+      show(e instanceof Error ? e.message : "保存失败", "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const selectedList = useMemo(() => Array.from(selected), [selected]);
+
+  return (
+    <Modal
+      open
+      title={`设置跳过目录 — ${drive.name || drive.id}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="admin-btn" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="admin-btn is-primary"
+            onClick={handleSave}
+            disabled={saving}
+          >
+            {saving ? "保存中..." : `保存（${selectedList.length}）`}
+          </button>
+        </>
+      }
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <p className="admin-text-faint" style={{ margin: 0, fontSize: "13px" }}>
+          勾选要在扫描时跳过的目录。命中目录及其全部子目录都不会被递归扫描，
+          也不会进入新增/删除统计。下次扫描（凌晨流水线或手动重扫）生效。
+        </p>
+
+        <SelectedDirsChips
+          drive={drive}
+          selected={selectedList}
+          onRemove={toggle}
+        />
+
+        <div
+          style={{
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "8px",
+            padding: "8px 4px",
+            maxHeight: "420px",
+            overflow: "auto",
+          }}
+        >
+          <DirTreeNode
+            driveId={drive.id}
+            id="" // 空 = 让后端用 RootID
+            name={drive.name || drive.id}
+            depth={0}
+            initiallyOpen
+            ancestorSkipped={false}
+            selected={selected}
+            onToggle={toggle}
+          />
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// SelectedDirsChips 显示已选目录的 ID 列表（chips）；目录"名"无法在不展开树
+// 的情况下拿到（树是按需展开的），所以这里只显示 ID + drive 信息。点 × 移除。
+function SelectedDirsChips({
+  drive,
+  selected,
+  onRemove,
+}: {
+  drive: api.AdminDrive;
+  selected: string[];
+  onRemove: (id: string) => void;
+}) {
+  if (selected.length === 0) {
+    return (
+      <div
+        className="admin-text-faint"
+        style={{ fontSize: "13px", padding: "6px 0" }}
+      >
+        当前未勾选任何跳过目录（{drive.kind === "p115" ? "115 网盘" : drive.kind}{" "}
+        将完整扫描）。
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+      {selected.map((id) => (
+        <span
+          key={id}
+          className="admin-mono-cell"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+            padding: "3px 10px",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "999px",
+            fontSize: "12px",
+          }}
+          title="点击 × 移除"
+        >
+          {id}
+          <button
+            type="button"
+            onClick={() => onRemove(id)}
+            style={{
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              color: "var(--text-secondary)",
+              padding: 0,
+              lineHeight: 1,
+              fontSize: "14px",
+            }}
+            aria-label={`移除 ${id}`}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// DirTreeNode：树的一个节点；按需展开（onClick 触发 listDriveDirChildren）。
+//
+// - id="" 时表示根节点，调用 dirtree 时不传 parent → 后端用 drive 的 RootID
+// - depth=0 不展示 chevron 切换（根总是展开）
+// - ancestorSkipped=true 表示某个祖先已被勾选跳过 → 子树灰显但仍允许操作
+//   （考虑到用户可能想取消祖先转而精细勾选，UI 上不强制禁用）
+type DirTreeNodeProps = {
+  driveId: string;
+  id: string;
+  name: string;
+  depth: number;
+  initiallyOpen?: boolean;
+  ancestorSkipped: boolean;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+};
+
+function DirTreeNode({
+  driveId,
+  id,
+  name,
+  depth,
+  initiallyOpen,
+  ancestorSkipped,
+  selected,
+  onToggle,
+}: DirTreeNodeProps) {
+  const [open, setOpen] = useState(!!initiallyOpen);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [children, setChildren] = useState<api.DriveDirEntry[]>([]);
+  const [error, setError] = useState("");
+
+  const isRoot = depth === 0;
+  const isSelected = id !== "" && selected.has(id);
+  const dimmed = ancestorSkipped;
+
+  const loadChildren = useCallback(async () => {
+    if (loaded || loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const data = await api.listDriveDirChildren(driveId, id || undefined);
+      setChildren(data ?? []);
+      setLoaded(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [driveId, id, loaded, loading]);
+
+  useEffect(() => {
+    if (open && !loaded) {
+      void loadChildren();
+    }
+  }, [open, loaded, loadChildren]);
+
+  function handleToggleOpen() {
+    setOpen((v) => !v);
+  }
+
+  return (
+    <div
+      style={{
+        paddingLeft: depth === 0 ? 0 : 16,
+        opacity: dimmed && !isSelected ? 0.55 : 1,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          padding: "4px 6px",
+          borderRadius: "4px",
+          background: isSelected ? "var(--accent-soft, rgba(255,140,0,0.12))" : "transparent",
+        }}
+      >
+        {!isRoot ? (
+          <button
+            type="button"
+            onClick={handleToggleOpen}
+            style={{
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              padding: 0,
+              display: "inline-flex",
+              alignItems: "center",
+            }}
+            aria-label={open ? "折叠" : "展开"}
+          >
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        ) : (
+          <span style={{ width: 14, display: "inline-block" }} />
+        )}
+
+        {!isRoot && (
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => onToggle(id)}
+            aria-label={`跳过目录 ${name}`}
+          />
+        )}
+
+        <span
+          style={{
+            fontSize: "13px",
+            cursor: isRoot ? "default" : "pointer",
+            userSelect: "none",
+            fontWeight: isRoot ? 600 : 400,
+          }}
+          onClick={isRoot ? undefined : handleToggleOpen}
+        >
+          {name}
+          {isRoot ? " (根目录)" : ""}
+        </span>
+        {!isRoot && (
+          <span
+            className="admin-mono-cell admin-text-faint"
+            style={{ fontSize: "11px", marginLeft: "6px" }}
+          >
+            {id}
+          </span>
+        )}
+      </div>
+
+      {open && (
+        <div>
+          {loading && (
+            <div className="admin-text-faint" style={{ fontSize: "12px", padding: "4px 28px" }}>
+              加载中...
+            </div>
+          )}
+          {error && (
+            <div style={{ fontSize: "12px", padding: "4px 28px", color: "var(--danger, #d33)" }}>
+              {error}
+            </div>
+          )}
+          {loaded && !error && children.length === 0 && (
+            <div className="admin-text-faint" style={{ fontSize: "12px", padding: "4px 28px" }}>
+              （无子目录）
+            </div>
+          )}
+          {children.map((child) => (
+            <DirTreeNode
+              key={child.id}
+              driveId={driveId}
+              id={child.id}
+              name={child.name}
+              depth={depth + 1}
+              ancestorSkipped={ancestorSkipped || isSelected}
+              selected={selected}
+              onToggle={onToggle}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

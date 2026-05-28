@@ -101,10 +101,10 @@ func main() {
 	}
 
 	apiServer := &api.Server{
-		Catalog:    cat,
-		Proxy:      app.proxy,
-		LocalDir:   cfg.Storage.LocalPreviewDir,
-		UploadDir:  app.localUploadDir(),
+		Catalog:   cat,
+		Proxy:     app.proxy,
+		LocalDir:  cfg.Storage.LocalPreviewDir,
+		UploadDir: app.localUploadDir(),
 		OnVideoUploaded: func(v *catalog.Video) {
 			app.enqueueUploadedVideo(ctx, v)
 		},
@@ -134,7 +134,7 @@ func main() {
 				go app.runSpider91Crawl(ctx, driveID)
 				return
 			}
-			go app.runScan(ctx, driveID)
+			app.scheduleScan(ctx, driveID)
 		},
 		OnRegenPreview: func(videoID string) {
 			go app.regenPreview(ctx, videoID)
@@ -144,6 +144,9 @@ func main() {
 		},
 		OnRegenFailedPreviews: func(driveID string) {
 			go app.regenFailedPreviews(ctx, driveID)
+		},
+		OnRegenFailedThumbnails: func(driveID string) {
+			go app.regenFailedThumbnails(ctx, driveID)
 		},
 		GetDriveGenerationStatuses: func() map[string]api.DriveGenerationStatuses {
 			return app.driveGenerationStatuses()
@@ -172,6 +175,9 @@ func main() {
 			if app.nightlyRunner != nil {
 				app.nightlyRunner.TriggerNow()
 			}
+		},
+		ListDriveDirChildren: func(reqCtx context.Context, driveID, parentID string) ([]api.DriveDirEntry, error) {
+			return app.listDriveDirChildren(reqCtx, driveID, parentID)
 		},
 	}
 
@@ -249,6 +255,22 @@ type App struct {
 	// nightlyRunner 是凌晨流水线调度器：每天 cron_hour 串行跑扫盘 → 91 爬虫 → 迁移。
 	// 也响应 admin 「立即跑全流程」按钮（TriggerNow）。
 	nightlyRunner *nightly.Runner
+
+	// scanGlobalMu 串行化所有云盘扫盘任务，确保同一时刻全系统只有一个扫盘
+	// 在跑（包括 admin 手动重扫和 nightly Phase 1）。即便用户同时点多个 drive
+	// 的"重扫"按钮，goroutine 也会排队等这把锁，逐个执行。
+	//
+	// 设计取舍：
+	//   - 不同 drive 的扫盘技术上可以并行（互不干涉），但用户希望"线性来"以
+	//     避免带宽 / CPU 抢占，所以做全局串行。
+	//   - nightly Phase 1 已经是 for 循环顺序调用 runScan，加了这把锁后行为
+	//     不变，只是顺手把 admin 异步触发的请求也接入同一条队列。
+	scanGlobalMu sync.Mutex
+	// scanQueueMu 保护 scanQueued。
+	scanQueueMu sync.Mutex
+	// scanQueued 跟踪哪些 driveID 已经排队或正在跑，去重后续重复点击。
+	// 一个 drive 在 scheduleScan 入队时被加入，在 runScan goroutine 结束时被移除。
+	scanQueued map[string]bool
 }
 
 // teaserEnabledForDrive 查询某个 drive 当前的 per-drive teaser 开关。
@@ -798,7 +820,96 @@ func (a *App) detachDrive(id string) {
 	a.mu.Unlock()
 }
 
+// listDriveDirChildren 实现 AdminServer.ListDriveDirChildren：
+// 列指定 drive 在 parentID 下的直接子目录，仅返回目录条目（IsDir=true），文件忽略。
+//
+// parentID 为空时使用 drive 实例的 RootID()，与扫描起点保持一致 —— 但有意不
+// 用 ScanRootID：用户在"设置跳过目录"弹窗里浏览的是整个网盘逻辑根，方便从 0
+// 起逐层挑跳过点；ScanRootID 仅用于实际扫描起点。
+//
+// 性能优化：p115 的 Driver.List 走 SDK 的 ListWithLimit，会把目录里全部文件 +
+// 目录分页拉完才返回；某些 115 根目录累积了几万个视频，单次列目录可能卡几十
+// 秒（叠加 driver 的 2s 间隔限频）。所以 p115 走 ListDirsOnly 快路径：单页
+// (1150)、按 file_type 排序，扫一遍只挑目录条目，1 次 API 调用搞定。其它网盘
+// 走标准 List + IsDir 过滤 —— 它们的根目录通常不会有几万个文件。
+//
+// drive 未挂载（如凭证错误未通过 Init）时返回 error；前端展示 5xx 给用户。
+func (a *App) listDriveDirChildren(ctx context.Context, driveID, parentID string) ([]api.DriveDirEntry, error) {
+	drv, ok := a.registry.Get(driveID)
+	if !ok {
+		return nil, fmt.Errorf("drive %s not attached", driveID)
+	}
+	if parentID == "" {
+		parentID = drv.RootID()
+	}
+	// p115 快路径：避免拉全部分页文件
+	if fast, ok := drv.(interface {
+		ListDirsOnly(ctx context.Context, dirID string) ([]drives.Entry, error)
+	}); ok {
+		entries, err := fast.ListDirsOnly(ctx, parentID)
+		if err != nil {
+			return nil, fmt.Errorf("list drive %s parent %s dirs-only: %w", driveID, parentID, err)
+		}
+		out := make([]api.DriveDirEntry, 0, len(entries))
+		for _, e := range entries {
+			out = append(out, api.DriveDirEntry{ID: e.ID, Name: e.Name})
+		}
+		return out, nil
+	}
+	// 通用路径
+	entries, err := drv.List(ctx, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("list drive %s parent %s: %w", driveID, parentID, err)
+	}
+	out := make([]api.DriveDirEntry, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir {
+			continue
+		}
+		out = append(out, api.DriveDirEntry{ID: e.ID, Name: e.Name})
+	}
+	return out, nil
+}
+
+// scheduleScan 异步触发某个 drive 的扫盘。
+//
+// 调用立即返回；扫盘任务在后台 goroutine 里排队执行 —— 系统中所有扫盘共享
+// 一把 scanGlobalMu，按提交顺序串行跑。
+//
+// 去重：如果该 drive 已经在排队或正在跑，重复请求会被丢弃并记日志。这样用户
+// 反复点同一个 drive 的"重扫"按钮，也只会有一次实际工作。
+//
+// 用于 admin UI「重扫」、「立即抓取」这类异步触发；nightly Phase 1 应继续直接
+// 调 runScan（同步、按 for 循环顺序），不需要走 scheduleScan。
+func (a *App) scheduleScan(ctx context.Context, driveID string) {
+	a.scanQueueMu.Lock()
+	if a.scanQueued == nil {
+		a.scanQueued = make(map[string]bool)
+	}
+	if a.scanQueued[driveID] {
+		a.scanQueueMu.Unlock()
+		log.Printf("[scan] drive=%s already queued or running, skip duplicate request", driveID)
+		return
+	}
+	a.scanQueued[driveID] = true
+	a.scanQueueMu.Unlock()
+
+	go func() {
+		defer func() {
+			a.scanQueueMu.Lock()
+			delete(a.scanQueued, driveID)
+			a.scanQueueMu.Unlock()
+		}()
+		a.runScan(ctx, driveID)
+	}()
+}
+
 func (a *App) runScan(ctx context.Context, driveID string) {
+	// 全局串行：同一时刻只有一个扫盘任务在跑（admin 重扫 + nightly Phase 1 共用）。
+	// 等待这把锁的 goroutine 在排队，按到达顺序逐个执行。
+	a.scanGlobalMu.Lock()
+	defer a.scanGlobalMu.Unlock()
+
 	drv, ok := a.registry.Get(driveID)
 	if !ok {
 		log.Printf("[scan] drive %s not attached", driveID)
@@ -819,34 +930,27 @@ func (a *App) runScan(ctx context.Context, driveID string) {
 		}
 	}
 
-	sc := scanner.New(a.cat, drv, a.cfg.Scanner.VideoExtensions, a.cfg.Scanner.MaxDepth, onNew)
-
-	// 使用 drive 的 scan_root_id，否则 root_id
+	// 使用 drive 的 scan_root_id，否则 root_id；同时把 admin 配置的 SkipDirIDs
+	// 传给 scanner（命中即不递归）。
 	d, err := a.cat.GetDrive(ctx, driveID)
 	if err != nil {
 		log.Printf("[scan] get drive %s: %v", driveID, err)
 		return
 	}
+	sc := scanner.New(a.cat, drv, a.cfg.Scanner.VideoExtensions, d.SkipDirIDs, onNew)
+
 	startID := d.ScanRootID
 	if startID == "" {
 		startID = d.RootID
 	}
 
-	log.Printf("[scan] drive=%s start=%s", driveID, startID)
+	log.Printf("[scan] drive=%s start=%s skip_dirs=%d", driveID, startID, len(d.SkipDirIDs))
 	stats, err := sc.Run(ctx, startID)
 	if err != nil {
 		log.Printf("[scan] drive=%s error: %v", driveID, err)
 		return
 	}
 	log.Printf("[scan] drive=%s done scanned=%d added=%d errors=%d", driveID, stats.Scanned, stats.Added, stats.Errors)
-	if drv.Kind() == "p115" && len(stats.ExcludedFileIDs) > 0 {
-		removed, err := a.cleanupExcludedDriveVideos(ctx, driveID, stats.ExcludedFileIDs)
-		if err != nil {
-			log.Printf("[cleanup] excluded 115 videos drive=%s error: %v", driveID, err)
-		} else if removed > 0 {
-			log.Printf("[cleanup] removed %d excluded 115 videos for drive=%s", removed, driveID)
-		}
-	}
 	// 删除检测：扫描到的 file_ids 是当前云盘上的真实存在；catalog 里这个 drive
 	// 名下、且其 parent_id 处在本次扫描走过的目录内（或本次是从根扫的）、却
 	// 不在 SeenFileIDs 中的视频 → 视为已被删除。
@@ -867,35 +971,6 @@ func (a *App) runScan(ctx context.Context, driveID string) {
 		}
 	}
 	a.enqueueDriveGeneration(ctx, driveID, worker, thumbWorker)
-}
-
-func (a *App) cleanupExcludedDriveVideos(ctx context.Context, driveID string, excludedFileIDs map[string]struct{}) (int, error) {
-	if len(excludedFileIDs) == 0 {
-		return 0, nil
-	}
-	items, err := a.cat.ListVideosByDrive(ctx, driveID)
-	if err != nil {
-		return 0, err
-	}
-
-	localDir := ""
-	if a.cfg != nil {
-		localDir = a.cfg.Storage.LocalPreviewDir
-	}
-	removed := 0
-	for _, v := range items {
-		if _, ok := excludedFileIDs[v.FileID]; !ok {
-			continue
-		}
-		if err := removeLocalVideoAssets(localDir, v); err != nil {
-			return removed, fmt.Errorf("remove local assets for %s: %w", v.ID, err)
-		}
-		if err := a.cat.DeleteVideo(ctx, v.ID); err != nil {
-			return removed, fmt.Errorf("delete catalog video %s: %w", v.ID, err)
-		}
-		removed++
-	}
-	return removed, nil
 }
 
 func (a *App) cleanupMissingDriveVideos(ctx context.Context, driveID string, liveFileIDs map[string]struct{}, visitedDirIDs map[string]struct{}, fullDriveScan bool) (int, error) {
@@ -1076,6 +1151,52 @@ func (a *App) regenFailedPreviews(ctx context.Context, driveID string) {
 		queued++
 	}
 	log.Printf("[preview] enqueued failed videos for regen drive=%s queued=%d", driveID, queued)
+}
+
+// regenFailedThumbnails 把某 drive 下 thumbnail_status=failed 的视频全部重置为
+// pending 并重新入队封面 worker。与 regenFailedPreviews 行为对称：那条管 teaser，
+// 这条管封面图（两个 worker 是独立队列）。
+//
+// 操作不会触发已生成失败的视频重新去网盘取流 —— 只是把 catalog 的状态翻到 pending
+// 并入队；真正的取链 / ffmpeg 在 thumb worker 里执行。
+func (a *App) regenFailedThumbnails(ctx context.Context, driveID string) {
+	items, err := a.cat.ListVideosByThumbnailStatus(ctx, driveID, "failed", 0)
+	if err != nil {
+		log.Printf("[thumb] list failed videos for regen drive=%s: %v", driveID, err)
+		return
+	}
+	a.mu.Lock()
+	thumbWorker := a.thumbWorkers[driveID]
+	a.mu.Unlock()
+	if thumbWorker == nil {
+		log.Printf("[thumb] regen failed drive=%s skipped: thumb worker not found", driveID)
+		return
+	}
+	log.Printf("[thumb] enqueue failed thumbnails for regen drive=%s count=%d", driveID, len(items))
+	queued := 0
+	for _, v := range items {
+		if err := ctx.Err(); err != nil {
+			log.Printf("[thumb] enqueue failed canceled drive=%s queued=%d: %v", driveID, queued, err)
+			return
+		}
+		// 状态翻 pending；保留 thumbnail_url 字段（thumb worker 先看 url 是否已写
+		// 来判断是否真的要再生）。但既然之前是 failed 说明 url 没写过，所以这里
+		// 把 url 一并清空更稳。
+		if err := a.cat.UpdateVideoMeta(ctx, v.ID, catalog.VideoMetaPatch{
+			ThumbnailURL:    "",
+			ThumbnailStatus: "pending",
+		}); err != nil {
+			log.Printf("[thumb] reset failed video %s drive=%s: %v", v.ID, driveID, err)
+			continue
+		}
+		v.ThumbnailURL = ""
+		if !thumbWorker.EnqueueBlocking(ctx, v) {
+			log.Printf("[thumb] enqueue failed canceled drive=%s queued=%d", driveID, queued)
+			return
+		}
+		queued++
+	}
+	log.Printf("[thumb] enqueued failed thumbnails for regen drive=%s queued=%d", driveID, queued)
 }
 
 // listScanTargetIDs 返回 nightly Phase 1 应扫描的所有 drive ID

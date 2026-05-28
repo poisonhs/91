@@ -13,10 +13,16 @@ import (
 )
 
 type Scanner struct {
-	Catalog  *catalog.Catalog
-	Drive    drives.Drive
-	Exts     map[string]bool
-	MaxDepth int
+	Catalog *catalog.Catalog
+	Drive   drives.Drive
+	Exts    map[string]bool
+	// SkipDirIDs 是用户在 admin 后台配置的"扫描跳过目录"集合（drive 侧的目录 fileID）。
+	// 命中其中任意一个时 scanner 直接 continue —— 不递归、不收集文件、不计入
+	// SeenFileIDs / VisitedDirIDs，自然也不会被后续 cleanupMissingDriveVideos 当
+	// 成"消失了"误删。替代旧版硬编码 p115 "影视" 目录例外分支。
+	//
+	// nil / 空集合 → 行为等同于不跳过任何目录。
+	SkipDirIDs map[string]struct{}
 	// 回调：新视频被加入后触发 teaser 生成
 	OnNewVideo func(v *catalog.Video)
 	// ProgressInterval 控制扫描内部 heartbeat 的最小输出间隔。
@@ -28,30 +34,38 @@ type Scanner struct {
 
 const defaultScanProgressInterval = 30 * time.Second
 
-func New(cat *catalog.Catalog, drv drives.Drive, exts []string, maxDepth int, onNew func(v *catalog.Video)) *Scanner {
+// New 构造一个 Scanner。
+//
+// skipDirIDs 是用户为该 drive 配置的"扫描跳过目录"集合（可空）；nil / 空集合
+// 表示不跳过任何目录。被跳过的目录及其全部子目录都不递归。
+func New(cat *catalog.Catalog, drv drives.Drive, exts []string, skipDirIDs []string, onNew func(v *catalog.Video)) *Scanner {
 	m := make(map[string]bool, len(exts))
 	for _, e := range exts {
 		m[strings.ToLower(e)] = true
 	}
-	if maxDepth == 0 {
-		maxDepth = 5
+	skip := make(map[string]struct{}, len(skipDirIDs))
+	for _, id := range skipDirIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		skip[id] = struct{}{}
 	}
 	return &Scanner{
 		Catalog:    cat,
 		Drive:      drv,
 		Exts:       m,
-		MaxDepth:   maxDepth,
+		SkipDirIDs: skip,
 		OnNewVideo: onNew,
 	}
 }
 
 type Stats struct {
-	Scanned         int
-	Added           int
-	Errors          int
-	SeenFileIDs     map[string]struct{}
-	VisitedDirIDs   map[string]struct{}
-	ExcludedFileIDs map[string]struct{}
+	Scanned       int
+	Added         int
+	Errors        int
+	SeenFileIDs   map[string]struct{}
+	VisitedDirIDs map[string]struct{}
 }
 
 // Run 从 Drive.RootID 开始扫描
@@ -60,9 +74,8 @@ func (s *Scanner) Run(ctx context.Context, startDirID string) (Stats, error) {
 		startDirID = s.Drive.RootID()
 	}
 	stats := Stats{
-		SeenFileIDs:     make(map[string]struct{}),
-		VisitedDirIDs:   make(map[string]struct{}),
-		ExcludedFileIDs: make(map[string]struct{}),
+		SeenFileIDs:   make(map[string]struct{}),
+		VisitedDirIDs: make(map[string]struct{}),
 	}
 
 	// heartbeat 闭包：进 / 退每个目录、每处理完一个文件后调一下，用一个时间戳节流。
@@ -95,16 +108,13 @@ func (s *Scanner) Run(ctx context.Context, startDirID string) (Stats, error) {
 			now.Sub(started).Round(time.Second), shown)
 	}
 
-	if err := s.walk(ctx, startDirID, "", 0, &stats, progress); err != nil {
+	if err := s.walk(ctx, startDirID, "", &stats, progress); err != nil {
 		return stats, err
 	}
 	return stats, nil
 }
 
-func (s *Scanner) walk(ctx context.Context, dirID, dirName string, depth int, stats *Stats, progress func(string)) error {
-	if depth >= s.MaxDepth {
-		return nil
-	}
+func (s *Scanner) walk(ctx context.Context, dirID, dirName string, stats *Stats, progress func(string)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -122,14 +132,11 @@ func (s *Scanner) walk(ctx context.Context, dirID, dirName string, depth int, st
 			if strings.EqualFold(e.Name, "previews") {
 				continue
 			}
-			if s.shouldExcludeDir(e.Name) {
-				if err := s.collectExcludedFiles(ctx, e.ID, depth+1, stats); err != nil {
-					stats.Errors++
-					log.Printf("[scanner] exclude %s error: %v", e.Name, err)
-				}
+			// 用户在 admin 配置的跳过目录：直接 continue，不递归、不收集文件。
+			if _, skip := s.SkipDirIDs[e.ID]; skip {
 				continue
 			}
-			if err := s.walk(ctx, e.ID, e.Name, depth+1, stats, progress); err != nil {
+			if err := s.walk(ctx, e.ID, e.Name, stats, progress); err != nil {
 				stats.Errors++
 				log.Printf("[scanner] walk %s error: %v", e.Name, err)
 			}
@@ -228,37 +235,6 @@ func (s *Scanner) walk(ctx context.Context, dirID, dirName string, depth int, st
 		// 在每条文件处理完之后再 ping 一次，progress 内部的 30s 节流会把绝大多数
 		// 调用变成廉价的时间比较。
 		progress(dirName)
-	}
-	return nil
-}
-
-func (s *Scanner) shouldExcludeDir(name string) bool {
-	return s.Drive != nil &&
-		s.Drive.Kind() == "p115" &&
-		strings.TrimSpace(name) == "影视"
-}
-
-func (s *Scanner) collectExcludedFiles(ctx context.Context, dirID string, depth int, stats *Stats) error {
-	if depth >= s.MaxDepth {
-		return nil
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	entries, err := s.Drive.List(ctx, dirID)
-	if err != nil {
-		return fmt.Errorf("list excluded %s: %w", dirID, err)
-	}
-	for _, e := range entries {
-		if e.IsDir {
-			if err := s.collectExcludedFiles(ctx, e.ID, depth+1, stats); err != nil {
-				return err
-			}
-			continue
-		}
-		if e.ID != "" {
-			stats.ExcludedFileIDs[e.ID] = struct{}{}
-		}
 	}
 	return nil
 }

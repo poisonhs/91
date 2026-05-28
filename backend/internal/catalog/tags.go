@@ -59,6 +59,12 @@ func (c *Catalog) migrate(ctx context.Context) error {
 	if _, err := c.addColumnIfMissingReportNew(ctx, "drives", "teaser_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
+	// drives.skip_dir_ids：每盘扫描跳过目录集合（JSON array of string）。命中
+	// 其中任意一个的目录及其全部子目录都不会被递归扫描。替代旧版硬编码"影视"
+	// 目录例外分支；旧 drive 升级后默认空数组 → 行为等同于以前未启用跳过。
+	if err := c.addColumnIfMissing(ctx, "drives", "skip_dir_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
 	// 一次性修正：早期版本（短暂存在过）会把现存 drive 的 teaser_enabled 同步成
 	// 旧的全局 preview.enabled 值，导致升级后所有 drive 都是关。"默认开启"约定下，
 	// 这里一次性把所有 drive 强制重置为 1，并用 marker setting 记号，避免之后
@@ -93,6 +99,9 @@ func (c *Catalog) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := c.createCollectionTagsFromCategories(ctx); err != nil {
+		return err
+	}
+	if err := c.classifySystemTags(ctx); err != nil {
 		return err
 	}
 	if err := c.clearVolatileOneDriveThumbnails(ctx); err != nil {
@@ -248,6 +257,25 @@ func (c *Catalog) seedSystemTags(ctx context.Context) error {
 		if _, err := c.ensureTag(ctx, label, fixedtags.AliasesFor(label), "system"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (c *Catalog) classifySystemTags(ctx context.Context) error {
+	total := 0
+	for _, label := range fixedtags.Labels {
+		tag, err := c.getTagByLabel(ctx, label)
+		if err != nil {
+			return err
+		}
+		classified, err := c.classifyTag(ctx, tag)
+		if err != nil {
+			return err
+		}
+		total += classified
+	}
+	if total > 0 {
+		log.Printf("[catalog] classified %d existing video tag(s) using system tags", total)
 	}
 	return nil
 }
@@ -974,7 +1002,6 @@ func sortLabelsByTagOrder(tags []Tag, labels []string) []string {
 	})
 	return labels
 }
-
 
 // pruneOrphanCollectionTags 删除所有 source='collection' 且不再被任何 video_tags 引用的标签。
 // 在 migrate 末尾调用，相当于启动时自愈：之前 DeleteVideo 没顺带清理留下的孤儿，会在重启时被收回。

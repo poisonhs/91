@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"strconv"
@@ -52,6 +53,15 @@ type Driver struct {
 	// PikPak as abuse. With it, only one refresh is in flight; later
 	// callers observe d.captchaToken has changed and skip the refresh.
 	captchaMu sync.Mutex
+
+	// listMu / lastListAt / listInterval 做和 p115 driver 一样的列目录限频 +
+	// 冷却保护。listMu 保证整个 drive 同一时刻只有一次 list 在跑（避免并发
+	// 触发 PikPak 的"操作频繁 error_code=10"）；listInterval 是相邻 list 调用
+	// 的最小间隔（默认 1 秒）；命中疑似限流错误时进入 pikpakListCooldown
+	// 冷却 10 分钟后再重试，循环直到成功或 ctx 取消。
+	listMu       sync.Mutex
+	lastListAt   time.Time
+	listInterval time.Duration
 }
 
 type Config struct {
@@ -100,6 +110,7 @@ func New(c Config) *Driver {
 		client: resty.New().
 			SetTimeout(30*time.Second).
 			SetHeader("Accept", "application/json, text/plain, */*"),
+		listInterval: 1 * time.Second,
 	}
 	d.applyPlatformDefaults()
 	return d
@@ -130,7 +141,7 @@ func (d *Driver) List(ctx context.Context, dirID string) ([]drives.Entry, error)
 	if dirID == "" {
 		dirID = d.rootID
 	}
-	files, err := d.getFiles(ctx, dirID)
+	files, err := d.listWithRetry(ctx, dirID)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +150,110 @@ func (d *Driver) List(ctx context.Context, dirID string) ([]drives.Entry, error)
 		out = append(out, fileToEntry(f, dirID))
 	}
 	return out, nil
+}
+
+// pikpakListCooldown 是列目录触发疑似限流错误时的冷却时长。
+//
+// 与 p115 driver 的 listCooldown 同语义：只要错误属 transient
+// （error_code=10 / HTTP 429 / 5xx / 通用 "rate limit" 文本），就持续
+// 等 10 分钟再发一次列目录请求，直到成功或 ctx 取消。这样即使 PikPak
+// 风控持续较长时间，扫描会自然延后到风控结束，不再丢半棵子树。
+const pikpakListCooldown = 10 * time.Minute
+
+func (d *Driver) listWithRetry(ctx context.Context, dirID string) ([]file, error) {
+	d.listMu.Lock()
+	defer d.listMu.Unlock()
+
+	for attempt := 0; ; attempt++ {
+		if err := d.waitForListSlotLocked(ctx); err != nil {
+			return nil, err
+		}
+
+		files, err := d.getFiles(ctx, dirID)
+		if err == nil {
+			return files, nil
+		}
+		// 非 transient 错误（如 cookie 失效、目录不存在）直接返回；继续重试也只会反复失败。
+		if !isTransientPikPakListError(err) {
+			return nil, err
+		}
+		log.Printf("[pikpak] list cooling down drive=%s dir=%s cooldown=%s attempt=%d err=%v",
+			d.id, dirID, pikpakListCooldown, attempt+1, err)
+		if err := pikpakSleepContext(ctx, pikpakListCooldown); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// waitForListSlotLocked 节流相邻 list 调用。调用方必须已持有 d.listMu。
+func (d *Driver) waitForListSlotLocked(ctx context.Context) error {
+	if d.listInterval <= 0 || d.lastListAt.IsZero() {
+		d.lastListAt = time.Now()
+		return ctx.Err()
+	}
+	next := d.lastListAt.Add(d.listInterval)
+	now := time.Now()
+	if now.Before(next) {
+		if err := pikpakSleepContext(ctx, next.Sub(now)); err != nil {
+			return err
+		}
+	}
+	d.lastListAt = time.Now()
+	return ctx.Err()
+}
+
+func pikpakSleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// isTransientPikPakListError 判断 List 返回的错误是否属"瞬时限频/服务端不可用"
+// 类型，需要冷却后重试。覆盖：
+//
+//   - PikPak 业务码 error_code=10 ("操作频繁"，见 OpenList drivers/pikpak/util.go)
+//   - HTTP 429 / 500 / 502 / 503 / 504 / 509（rclone 也把这些归为 retry）
+//   - 通用文本：rate limit / too many requests / blocked / temporarily unavailable
+//
+// 不包含 4122/4121/16（access_token 过期）和 9/4002（captcha 过期）—— 这些
+// 由 requestOnce 内部已经做过一次自动恢复重试；如果恢复后仍然报这类错误，
+// 大概率是凭证或账号本身有问题，继续冷却重试无意义。
+func isTransientPikPakListError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 命中 PikPak 业务错误对象
+	var apiErr *errResp
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode {
+		case 10: // 操作频繁
+			return true
+		}
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "error_code=10") ||
+		strings.Contains(text, "429") ||
+		strings.Contains(text, "http 500") ||
+		strings.Contains(text, "http 502") ||
+		strings.Contains(text, "http 503") ||
+		strings.Contains(text, "http 504") ||
+		strings.Contains(text, "http 509") ||
+		strings.Contains(text, "too many request") ||
+		strings.Contains(text, "too many requests") ||
+		strings.Contains(text, "rate limit") ||
+		strings.Contains(text, "operation frequent") ||
+		strings.Contains(text, "操作频繁") ||
+		strings.Contains(text, "blocked") ||
+		strings.Contains(text, "temporarily unavailable") ||
+		strings.Contains(text, "service unavailable")
 }
 
 func (d *Driver) Stat(ctx context.Context, fileID string) (*drives.Entry, error) {

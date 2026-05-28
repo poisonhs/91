@@ -95,12 +95,12 @@ func TestCrawlerRunOnceFullFlow(t *testing.T) {
 
 	var newVideos []*catalog.Video
 	c := NewCrawler(CrawlerConfig{
-		Driver:         drv,
-		Catalog:        cat,
-		PythonPath:     "sh",
-		ScriptPath:     scriptPath,
-		CommonThumbDir: commonThumbs,
-		SpiderTimeout:  10 * time.Second,
+		Driver:          drv,
+		Catalog:         cat,
+		PythonPath:      "sh",
+		ScriptPath:      scriptPath,
+		CommonThumbDir:  commonThumbs,
+		SpiderTimeout:   10 * time.Second,
 		DownloadTimeout: 10 * time.Second,
 		OnNewVideo: func(v *catalog.Video) {
 			newVideos = append(newVideos, v)
@@ -232,13 +232,12 @@ func TestCrawlerRunOnceMissingScript(t *testing.T) {
 	}
 }
 
-
 // TestCrawlerThumbDownloadFailureMarksStatusFailed 验证：网站封面下载失败时
 // crawler 把 thumbnail_status 显式标 'failed'，避免 enqueueDriveGeneration 的
 // waitForThumbnailsBeforePreview 因为 count > 0 把 teaser 卡死等待。
 //
-// 历史 bug：之前 thumb 下载失败仅打 log，url='', status 走 schema DEFAULT 'pending'。
-// CountVideosNeedingThumbnail 条件是 url='' AND status != 'failed' → count=1。
+// 历史 bug：之前 thumb 下载失败仅打 log，url=”, status 走 schema DEFAULT 'pending'。
+// CountVideosNeedingThumbnail 条件是 url=” AND status != 'failed' → count=1。
 // spider91 drive 的 thumb worker 按设计不处理 spider91 视频 → 没人会改 status。
 // 结果 teaser 永远卡在 [preview] waiting for 1 thumbnails before teaser generation。
 func TestCrawlerThumbDownloadFailureMarksStatusFailed(t *testing.T) {
@@ -328,7 +327,6 @@ func TestCrawlerThumbDownloadFailureMarksStatusFailed(t *testing.T) {
 	}
 }
 
-
 // buildFakeSpiderScript 生成一个伪 python 脚本（其实是 sh）。
 //
 // 行为：
@@ -359,9 +357,9 @@ func buildFakeSpiderScript(entries []map[string]string) string {
 	sb.WriteString("  mkdir -p \"$(dirname \"$out\")\" 2>/dev/null\n")
 	sb.WriteString("  cat > \"$out\" <<'OUT_EOF'\n")
 	wrapper := map[string]any{
-		"crawl_time":  "2026-01-01T00:00:00",
+		"crawl_time":   "2026-01-01T00:00:00",
 		"total_videos": len(entries),
-		"videos":      entries,
+		"videos":       entries,
 	}
 	wrapped, _ := json.MarshalIndent(wrapper, "", "  ")
 	sb.Write(wrapped)

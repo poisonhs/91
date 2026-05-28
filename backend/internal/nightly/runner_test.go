@@ -2,7 +2,6 @@ package nightly
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,9 +52,6 @@ func TestNewAppliesDefaults(t *testing.T) {
 	if r.cfg.CronHour != 0 {
 		t.Errorf("CronHour zero-value should be preserved, got %d", r.cfg.CronHour)
 	}
-	if r.cfg.MaxDuration != 6*time.Hour {
-		t.Errorf("MaxDuration default = %s, want 6h", r.cfg.MaxDuration)
-	}
 }
 
 func TestNewRejectsInvalidCronHour(t *testing.T) {
@@ -66,13 +62,6 @@ func TestNewRejectsInvalidCronHour(t *testing.T) {
 	r2 := New(Config{CronHour: 25, Settings: newStubSettings()})
 	if r2.cfg.CronHour != 1 {
 		t.Fatalf("out-of-range cron_hour fall back to 1, got %d", r2.cfg.CronHour)
-	}
-}
-
-func TestNewRaisesUnsafeMaxDuration(t *testing.T) {
-	r := New(Config{MaxDuration: time.Second, Settings: newStubSettings()})
-	if r.cfg.MaxDuration != minSafeMaxDuration {
-		t.Fatalf("MaxDuration too small clamps to %s, got %s", minSafeMaxDuration, r.cfg.MaxDuration)
 	}
 }
 
@@ -134,10 +123,10 @@ func TestRunPipelineHonoursPhaseOrder(t *testing.T) {
 		"list-scan",
 		"scan:drive-a",
 		"scan:drive-b",
-		"wait-idle",       // after phase 1
+		"wait-idle", // after phase 1
 		"list-spider",
 		"crawl:sp-1",
-		"wait-idle",       // after phase 2
+		"wait-idle", // after phase 2
 		"migrate",
 	}
 	if len(got) != len(want) {
@@ -261,27 +250,22 @@ func TestRunPipelineLockedDropsOverlappingTriggers(t *testing.T) {
 	close(releaseFirst)
 }
 
-func TestSoftDeadlinePreventsLaterPhases(t *testing.T) {
+func TestSoftDeadlinePreventsLaterPhases_REMOVED(t *testing.T) {
+	t.Skip("legacy soft-deadline removed in 2026-05; see TestCtxCancelPreventsLaterPhases")
+}
+
+// TestCtxCancelPreventsLaterPhases 校验：ctx 在 phase 边界已取消（进程退出）时，
+// 后续 phase 不会启动。这是 checkDeadline 的核心语义，原"软超时"行为已废除，但
+// "ctx 已 done 就 bail" 仍保留。
+func TestCtxCancelPreventsLaterPhases(t *testing.T) {
 	rec := &recorder{}
 	settings := newStubSettings()
 
 	r := New(Config{
 		Settings:        settings,
-		MaxDuration:     minSafeMaxDuration, // smallest allowed
 		ListScanTargets: func(context.Context) []string { return nil },
 		WaitPreviewQueuesIdle: func(ctx context.Context) error {
-			// Force the wait to see a deadline-exceeded ctx before we proceed
-			ctxDone := make(chan struct{})
-			go func() {
-				<-ctx.Done()
-				close(ctxDone)
-			}()
-			select {
-			case <-ctxDone:
-				return ctx.Err()
-			case <-time.After(time.Second):
-				return errors.New("test timeout")
-			}
+			return ctx.Err()
 		},
 		ListSpider91Drives: func(context.Context) []string {
 			rec.push("list-spider")
@@ -291,8 +275,6 @@ func TestSoftDeadlinePreventsLaterPhases(t *testing.T) {
 		RunMigration:     func(context.Context) error { rec.push("migrate"); return nil },
 	})
 
-	// Build a runCtx whose deadline is already past to simulate timeout reached
-	// at a phase boundary. We can't directly inject, but emulate via canceled.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 

@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS drives (
     -- 是否给该盘生成 teaser/封面：1 开 / 0 关。
     -- 替代了早期的全局 preview.enabled 设置（保留旧 setting 行不再读）。
     teaser_enabled INTEGER NOT NULL DEFAULT 1,
+    -- 扫描时要跳过的目录 ID 集合（JSON array of string）。命中其中任意一个的目录及其
+    -- 全部子目录都不会被递归扫描，也不会进入 SeenFileIDs / VisitedDirIDs 统计。
+    -- 替代了早期硬编码"影视"目录的特例分支。
+    skip_dir_ids  TEXT NOT NULL DEFAULT '[]',
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );

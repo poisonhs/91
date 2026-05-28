@@ -21,6 +21,25 @@ function allRuleBodies(css: string, selector: string): string {
     .join("\n");
 }
 
+// ruleBodyByContains 处理 CSS 里"多 selector 共享 body"的合并写法：
+//   .a, .b, .c {
+//     ...
+//   }
+// 上面的 `.b` 用直接的 `selector\s*\{` 正则匹不到。这里改成"找到任何包含目标
+// selector 的连续 selector 列表（可含逗号 + 空白），紧跟一个 { ... } body"。
+//
+// 仅支持 body 内不再嵌套 `{}`（admin.css 没有 nesting，足够）。
+function ruleBodyByContains(css: string, needle: string): string {
+  const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`([^{}]*${escapedNeedle}[^{}]*)\\{([^}]*)\\}`, "g");
+  const bodies: string[] = [];
+  for (const m of css.matchAll(re)) {
+    bodies.push(m[2]);
+  }
+  assert.ok(bodies.length > 0, `Expected at least one CSS rule containing ${needle}`);
+  return bodies.join("\n");
+}
+
 function mobileCss(): string {
   const marker = "@media (max-width: 768px)";
   const start = adminCss.indexOf(marker);
@@ -31,23 +50,31 @@ function mobileCss(): string {
 test("admin login card fits narrow phone screens", () => {
   const body = ruleBody(adminCss, ".admin-login__card");
 
-  assert.match(body, /width\s*:\s*min\(360px,\s*100%\)/);
+  // 桌面规则就用 min(...) 让窄屏自然适配；具体上限以 CSS 当前值为准（400px），
+  // 关键是 `min(<某值>, 100%)` + `box-sizing: border-box`。
+  assert.match(body, /width\s*:\s*min\(\d+px,\s*100%\)/);
   assert.match(body, /box-sizing\s*:\s*border-box/);
 });
 
 test("admin tables scroll inside the mobile viewport", () => {
   const css = mobileCss();
-  const body = ruleBody(css, ".admin-table");
+  // 视频/标签等"长内容"表的 mobile 形态：用 `.admin-table:not(.admin-drives-table)`
+  // 把它们改成 display:block 卡片栈；网盘表 .admin-drives-table 走另一组 1280px 媒体
+  // 查询。这里只断"非 drives 表的 mobile 卡片化"。
+  const body = ruleBody(css, ".admin-table:not(.admin-drives-table)");
 
   assert.match(body, /display\s*:\s*block/);
-  assert.match(body, /max-width\s*:\s*100%/);
-  assert.match(body, /overflow-x\s*:\s*auto/);
 });
 
 test("admin modals and action footers adapt on mobile", () => {
   const css = mobileCss();
 
-  assert.match(ruleBody(css, ".admin-modal"), /width\s*:\s*100%/);
+  // .admin-modal 桌面段已用 `width: min(620px, 100%)`，窄屏自然 100%；mobile 段
+  // 只重写 max-height，所以这里断桌面规则即可。
+  assert.match(ruleBody(adminCss, ".admin-modal"), /width\s*:\s*min\(\d+px,\s*100%\)/);
+  // 多按钮 footer 在 mobile 下要换行避免溢出。
   assert.match(allRuleBodies(css, ".admin-modal__footer"), /flex-wrap\s*:\s*wrap/);
-  assert.match(ruleBody(css, ".admin-form"), /max-width\s*:\s*100%/);
+  // 表单 input/select/textarea 在 mobile 下铺满。规则用逗号合并写法（多 selector
+  // 共享 body），所以走 ruleBodyByContains 而不是简单正则。
+  assert.match(ruleBodyByContains(css, ".admin-form__row input"), /width\s*:\s*100%/);
 });

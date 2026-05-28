@@ -21,12 +21,8 @@ import (
 	"github.com/video-site/backend/internal/catalog"
 )
 
-// 默认 author 标签，便于在前端筛选 spider91 来源的视频。
+// 默认 author/tag 标签，便于在前端筛选 spider91 来源的视频。
 const DefaultAuthor = "91porn"
-
-// DefaultTag 是所有 spider91 来源视频自动打的固定标签。
-// backend 启动时会调用 CreateTagAndClassify 确保 tags 表里有 source="system"
-// 的对应行，避免被孤儿标签清理掉。
 const DefaultTag = "91porn"
 
 // DefaultTargetNew 是凌晨任务默认的"凑够这么多新视频"目标数。
@@ -108,15 +104,15 @@ func NewCrawler(cfg CrawlerConfig) *Crawler {
 // CrawlResult 汇总一次 RunOnce 的结果。
 type CrawlResult struct {
 	// TargetNew 是本次 RunOnce 的目标新增数（来自 drive.Credentials.target_new）。
-	TargetNew    int
+	TargetNew int
 	// TotalEntries 是 Python 输出 JSON 里的视频条数（已被 spider 端去重过的新视频）。
 	TotalEntries int
 	// NewVideos 是真正下载完并入库的新视频数。
-	NewVideos    int
+	NewVideos int
 	// Skipped 是 Go 侧二次校验时发现已存在的（理论上 Python 侧已经过滤过，正常情况下应为 0）。
-	Skipped      int
+	Skipped int
 	// Failed 是下载或入库失败的条数。
-	Failed       int
+	Failed int
 	// SeenSnapshot 调用 Python 时实际写出的已知 viewkey 数量。
 	SeenSnapshot int
 	StartedAt    time.Time
@@ -127,10 +123,10 @@ type CrawlResult struct {
 
 // spiderVideoEntry 对应 spider_91porn.py 输出 JSON 中的单条视频。
 type spiderVideoEntry struct {
-	Title    string `json:"title"`
-	ThumbURL string `json:"thumb_url"`
-	VideoURL string `json:"video_url"`
-	Viewkey  string `json:"viewkey"`
+	Title     string `json:"title"`
+	ThumbURL  string `json:"thumb_url"`
+	VideoURL  string `json:"video_url"`
+	Viewkey   string `json:"viewkey"`
 	DetailURL string `json:"detail_url"`
 }
 
@@ -423,8 +419,6 @@ func (c *Crawler) processOne(ctx context.Context, videoID string, item spiderVid
 		FileName:      videoFile,
 		Title:         strings.TrimSpace(item.Title),
 		Author:        DefaultAuthor,
-		// 所有 spider91 视频统一打 "91porn" 标签，便于前台筛选；
-		// UpsertVideo 会在新视频插入时自动 replaceVideoTags(... source="auto", createMissing=true)。
 		Tags:          []string{DefaultTag},
 		Ext:           strings.TrimPrefix(videoExt, "."),
 		Quality:       "HD",

@@ -455,6 +455,37 @@ func (c *Catalog) ListVideosByPreviewStatus(ctx context.Context, driveID, status
 	return out, nil
 }
 
+// ListVideosByThumbnailStatus 按封面（thumbnail）状态列出某 drive 下的视频。
+//
+// 与 ListVideosByPreviewStatus 的区别在 status 字段名：封面用 thumbnail_status，
+// 预览用 preview_status；两个 worker 是独立的。本接口主要用于 admin "重生失败
+// 封面"操作 —— 把状态为 failed 的封面挑出来重新入队。
+func (c *Catalog) ListVideosByThumbnailStatus(ctx context.Context, driveID, status string, limit int) ([]*Video, error) {
+	if limit <= 0 {
+		limit = 10000
+	}
+	rows, err := c.db.QueryContext(ctx,
+		`SELECT `+allVideoCols+` FROM videos
+		 WHERE drive_id = ? AND COALESCE(thumbnail_status, 'pending') = ?
+		   AND COALESCE(hidden, 0) = 0
+		   AND `+uniqueVideoWhereSQL+`
+		 ORDER BY created_at ASC LIMIT ?`,
+		driveID, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Video
+	for rows.Next() {
+		v, err := scanVideo(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
 // ListVideosNeedingThumbnail returns videos that still need a thumbnail attempt.
 // Failed thumbnails are reported separately and should not block teaser generation.
 func (c *Catalog) ListVideosNeedingThumbnail(ctx context.Context, driveID string, limit int) ([]*Video, error) {
@@ -914,21 +945,31 @@ type Drive struct {
 	LastError   string            `json:"lastError,omitempty"`
 	// TeaserEnabled 控制是否给本盘生成 teaser/封面。
 	// 替代早期的全局 preview.enabled 开关；新建 drive 时 UpsertDrive 默认置 true。
-	TeaserEnabled bool      `json:"teaserEnabled"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	TeaserEnabled bool `json:"teaserEnabled"`
+	// SkipDirIDs 是用户在管理后台为该盘选定的"扫描跳过目录"集合（网盘侧的目录 fileID）。
+	// scanner 在 walk 时命中其中任意一个就直接 continue —— 不递归、不收集文件，也
+	// 不参与 stats 统计。替代旧版硬编码"影视"目录的特例分支。
+	// 含义按"目录 ID 自身"匹配，所以同名目录在不同父级下需要分别选定。
+	SkipDirIDs []string  `json:"skipDirIds,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 func (c *Catalog) UpsertDrive(ctx context.Context, d *Drive) error {
 	cred, _ := json.Marshal(d.Credentials)
+	skipDirs := d.SkipDirIDs
+	if skipDirs == nil {
+		skipDirs = []string{}
+	}
+	skipDirsJSON, _ := json.Marshal(skipDirs)
 	now := time.Now().UnixMilli()
 	if d.CreatedAt.IsZero() {
 		d.CreatedAt = time.UnixMilli(now)
 	}
 	d.UpdatedAt = time.UnixMilli(now)
 	_, err := c.db.ExecContext(ctx, `
-INSERT INTO drives (id, kind, name, root_id, scan_root_id, credentials, status, last_error, teaser_enabled, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO drives (id, kind, name, root_id, scan_root_id, credentials, status, last_error, teaser_enabled, skip_dir_ids, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   kind           = excluded.kind,
   name           = excluded.name,
@@ -938,14 +979,15 @@ ON CONFLICT(id) DO UPDATE SET
   status         = excluded.status,
   last_error     = excluded.last_error,
   teaser_enabled = excluded.teaser_enabled,
+  skip_dir_ids   = excluded.skip_dir_ids,
   updated_at     = excluded.updated_at
-`, d.ID, d.Kind, d.Name, d.RootID, d.ScanRootID, string(cred), d.Status, d.LastError, boolToInt(d.TeaserEnabled),
+`, d.ID, d.Kind, d.Name, d.RootID, d.ScanRootID, string(cred), d.Status, d.LastError, boolToInt(d.TeaserEnabled), string(skipDirsJSON),
 		d.CreatedAt.UnixMilli(), d.UpdatedAt.UnixMilli())
 	return err
 }
 
 func (c *Catalog) ListDrives(ctx context.Context) ([]*Drive, error) {
-	rows, err := c.db.QueryContext(ctx, `SELECT id, kind, name, root_id, COALESCE(scan_root_id, ''), COALESCE(credentials, '{}'), status, COALESCE(last_error, ''), COALESCE(teaser_enabled, 1), created_at, updated_at FROM drives ORDER BY created_at ASC`)
+	rows, err := c.db.QueryContext(ctx, `SELECT id, kind, name, root_id, COALESCE(scan_root_id, ''), COALESCE(credentials, '{}'), status, COALESCE(last_error, ''), COALESCE(teaser_enabled, 1), COALESCE(skip_dir_ids, '[]'), created_at, updated_at FROM drives ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -953,13 +995,14 @@ func (c *Catalog) ListDrives(ctx context.Context) ([]*Drive, error) {
 	var out []*Drive
 	for rows.Next() {
 		d := &Drive{}
-		var credsStr string
+		var credsStr, skipDirsStr string
 		var teaserEnabled int
 		var createdAt, updatedAt int64
-		if err := rows.Scan(&d.ID, &d.Kind, &d.Name, &d.RootID, &d.ScanRootID, &credsStr, &d.Status, &d.LastError, &teaserEnabled, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Kind, &d.Name, &d.RootID, &d.ScanRootID, &credsStr, &d.Status, &d.LastError, &teaserEnabled, &skipDirsStr, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(credsStr), &d.Credentials)
+		_ = json.Unmarshal([]byte(skipDirsStr), &d.SkipDirIDs)
 		d.TeaserEnabled = teaserEnabled != 0
 		d.CreatedAt = time.UnixMilli(createdAt)
 		d.UpdatedAt = time.UnixMilli(updatedAt)
@@ -969,15 +1012,16 @@ func (c *Catalog) ListDrives(ctx context.Context) ([]*Drive, error) {
 }
 
 func (c *Catalog) GetDrive(ctx context.Context, id string) (*Drive, error) {
-	row := c.db.QueryRowContext(ctx, `SELECT id, kind, name, root_id, COALESCE(scan_root_id, ''), COALESCE(credentials, '{}'), status, COALESCE(last_error, ''), COALESCE(teaser_enabled, 1), created_at, updated_at FROM drives WHERE id = ?`, id)
+	row := c.db.QueryRowContext(ctx, `SELECT id, kind, name, root_id, COALESCE(scan_root_id, ''), COALESCE(credentials, '{}'), status, COALESCE(last_error, ''), COALESCE(teaser_enabled, 1), COALESCE(skip_dir_ids, '[]'), created_at, updated_at FROM drives WHERE id = ?`, id)
 	d := &Drive{}
-	var credsStr string
+	var credsStr, skipDirsStr string
 	var teaserEnabled int
 	var createdAt, updatedAt int64
-	if err := row.Scan(&d.ID, &d.Kind, &d.Name, &d.RootID, &d.ScanRootID, &credsStr, &d.Status, &d.LastError, &teaserEnabled, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&d.ID, &d.Kind, &d.Name, &d.RootID, &d.ScanRootID, &credsStr, &d.Status, &d.LastError, &teaserEnabled, &skipDirsStr, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(credsStr), &d.Credentials)
+	_ = json.Unmarshal([]byte(skipDirsStr), &d.SkipDirIDs)
 	d.TeaserEnabled = teaserEnabled != 0
 	d.CreatedAt = time.UnixMilli(createdAt)
 	d.UpdatedAt = time.UnixMilli(updatedAt)
@@ -1002,6 +1046,38 @@ func (c *Catalog) SetDriveTeaserEnabled(ctx context.Context, id string, enabled 
 	res, err := c.db.ExecContext(ctx,
 		`UPDATE drives SET teaser_enabled = ?, updated_at = ? WHERE id = ?`,
 		boolToInt(enabled), time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// SetDriveSkipDirIDs 重写某盘的"扫描跳过目录"集合（直接覆盖，不做增量合并）。
+//
+// 与 UpsertDrive 的区别：只动 skip_dir_ids + updated_at，不要求调用方重传
+// kind / name / credentials 等字段（避免管理后台保存跳过目录时把凭证误覆盖）。
+//
+// 入参 ids 可以是 nil 或空切片，等价于"清空跳过列表"。元素会按字符串原样存储；
+// 调用方负责在保存前 trim/去重；这里只保证编码成 JSON 数组。
+//
+// drive 不存在时返回 sql.ErrNoRows，调用方可以照此返回 404。
+func (c *Catalog) SetDriveSkipDirIDs(ctx context.Context, id string, ids []string) error {
+	if id == "" {
+		return fmt.Errorf("catalog: set drive skip_dir_ids: empty id")
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	payload, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("catalog: marshal skip_dir_ids: %w", err)
+	}
+	res, err := c.db.ExecContext(ctx,
+		`UPDATE drives SET skip_dir_ids = ?, updated_at = ? WHERE id = ?`,
+		string(payload), time.Now().UnixMilli(), id)
 	if err != nil {
 		return err
 	}

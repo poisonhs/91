@@ -84,12 +84,18 @@ func (d *Driver) List(ctx context.Context, dirID string) ([]drives.Entry, error)
 	return out, nil
 }
 
+// p115ListCooldown 是列目录触发疑似风控错误时的冷却时长。
+//
+// 历史上是 [30min × 3]，3 次都失败就放弃；新策略改为 10 分钟无限重试 ——
+// 只要错误仍属 transient（429 / 405 / WAF / blocked / 安全威胁 / unexpected），
+// 就持续等 10 分钟再发一次列目录请求，直到成功或 ctx 取消。这样即使 115
+// 风控持续较长时间，扫描会自然延后到风控结束，不再丢半棵子树。
+const p115ListCooldown = 10 * time.Minute
+
 func (d *Driver) listWithRetry(ctx context.Context, dirID string) (*[]sdk.File, error) {
 	d.listMu.Lock()
 	defer d.listMu.Unlock()
 
-	cooldowns := []time.Duration{30 * time.Minute, 30 * time.Minute, 30 * time.Minute}
-	var lastErr error
 	for attempt := 0; ; attempt++ {
 		if err := d.waitForListSlotLocked(ctx); err != nil {
 			return nil, err
@@ -99,17 +105,16 @@ func (d *Driver) listWithRetry(ctx context.Context, dirID string) (*[]sdk.File, 
 		if err == nil {
 			return files, nil
 		}
-		lastErr = err
-		if !isTransient115ListError(err) || attempt >= len(cooldowns) {
-			break
+		// 非 transient 错误（如 cookie 失效）直接返回；继续重试也只会反复失败。
+		if !isTransient115ListError(err) {
+			return nil, err
 		}
-		cooldown := cooldowns[attempt]
-		log.Printf("[p115] list cooling down drive=%s dir=%s cooldown=%s attempt=%d/%d", d.id, dirID, cooldown, attempt+1, len(cooldowns))
-		if err := sleepContext(ctx, cooldown); err != nil {
+		log.Printf("[p115] list cooling down drive=%s dir=%s cooldown=%s attempt=%d err=%v",
+			d.id, dirID, p115ListCooldown, attempt+1, err)
+		if err := sleepContext(ctx, p115ListCooldown); err != nil {
 			return nil, err
 		}
 	}
-	return nil, lastErr
 }
 
 func (d *Driver) waitForListSlotLocked(ctx context.Context) error {
@@ -158,6 +163,65 @@ func isTransient115ListError(err error) bool {
 		strings.Contains(text, "unexpected error") ||
 		strings.Contains(text, "访问被阻断") ||
 		strings.Contains(text, "安全威胁")
+}
+
+// ListDirsOnly 只列指定目录的直接**子目录**，不返回文件条目。专为 admin 后台
+// 的"设置跳过目录"树形浏览器优化 —— 那里只显示目录节点，文件无意义。
+//
+// 性能差异：默认 List 走 SDK 的 ListWithLimit，分页拉到 offset>=count，会把
+// 全部文件 + 目录一起拉下来。某个 115 根目录可能累积了几万个视频，叠加 driver
+// 自己的 2 秒间隔限频，单次根列出会卡几十秒。这里用 `WithOrder(FileOrderByType)`
+// 让目录排在最前，只读第一页（最多 1150 条），命中第一个非目录条目就停止 ——
+// 几乎所有网盘的"单层目录数"都远小于 1150，1 次 API 调用就能拿全。
+//
+// 仍然走 listMu / listWithRetry 同样的 2s 间隔 + 10 分钟冷却语义，避免和扫描
+// 走的列目录请求并发触发风控。
+func (d *Driver) ListDirsOnly(ctx context.Context, dirID string) ([]drives.Entry, error) {
+	d.listMu.Lock()
+	defer d.listMu.Unlock()
+
+	for attempt := 0; ; attempt++ {
+		if err := d.waitForListSlotLocked(ctx); err != nil {
+			return nil, err
+		}
+
+		req := d.client.NewRequest().ForceContentType("application/json;charset=UTF-8")
+		// 单页拉 MaxDirPageLimit=1150 条，按"file_type asc"排序让目录排前 ——
+		// 这样即使某个目录条目数量超过 1150，目录通常仍能落在第一页。但我们不
+		// 依赖这个顺序保证：扫完整页所有 entry，只挑目录（FileID=="" 即为目录），
+		// 文件直接忽略。1150 个 entry 解析是微秒级开销，无需提前 break。
+		resp, err := sdk.GetFiles(req, dirID,
+			sdk.WithOrder(sdk.FileOrderByType),
+			sdk.WithAsc(true),
+			sdk.WithLimit(sdk.MaxDirPageLimit),
+			sdk.WithOffset(0),
+		)
+		if err == nil && resp != nil {
+			out := make([]drives.Entry, 0, 32)
+			for _, fi := range resp.Files {
+				if fi.FileID != "" {
+					continue // 文件，跳过
+				}
+				f := (&sdk.File{}).From(&fi)
+				out = append(out, fileToEntry(f, dirID))
+			}
+			// 极端兜底：如果该目录的总条目数 > 1150 且目录条目不在首页，记一行
+			// warning 让运维知道可能漏目录；正常网盘单层目录数远小于 1150。
+			if int64(resp.Count) > sdk.MaxDirPageLimit {
+				log.Printf("[p115] list-dirs warning drive=%s dir=%s total=%d page=%d dirs_in_page=%d (sub-dirs beyond first page may be missed)",
+					d.id, dirID, resp.Count, sdk.MaxDirPageLimit, len(out))
+			}
+			return out, nil
+		}
+		if !isTransient115ListError(err) {
+			return nil, fmt.Errorf("115 list dirs: %w", err)
+		}
+		log.Printf("[p115] list-dirs cooling down drive=%s dir=%s cooldown=%s attempt=%d err=%v",
+			d.id, dirID, p115ListCooldown, attempt+1, err)
+		if err := sleepContext(ctx, p115ListCooldown); err != nil {
+			return nil, err
+		}
+	}
 }
 
 func (d *Driver) Stat(ctx context.Context, fileID string) (*drives.Entry, error) {
@@ -250,9 +314,9 @@ type UploadResult struct {
 //  1. 把 r 全量缓冲到本地临时文件并同时算 SHA1，避免在内存里堆 100MB 视频；
 //     拿到 *os.File 后才能进 SDK 的 RapidUploadOrByMultipart 分片上传通道。
 //  2. SDK 的 RapidUploadOrByMultipart 内部会：
-//       a. 调 /upload/init 走 ECDH 加密的秒传协议，命中即结束；
-//       b. 对 status=7 自动做范围 SHA1 二次校验后重试；
-//       c. 未命中且 size<=1KB 走 OSS PutObject；否则按 fileSize<i*GB → i*1000 片切分调 OSS multipart。
+//     a. 调 /upload/init 走 ECDH 加密的秒传协议，命中即结束；
+//     b. 对 status=7 自动做范围 SHA1 二次校验后重试；
+//     c. 未命中且 size<=1KB 走 OSS PutObject；否则按 fileSize<i*GB → i*1000 片切分调 OSS multipart。
 //  3. SDK 不返回 fileID。我们在上传完成后用 GetFiles 列父目录，按 SHA1 + 文件名匹配新文件。
 //     列父目录时按时间倒序拉前 500 条，刚上传的文件会在最前面，几乎不会漏。
 //

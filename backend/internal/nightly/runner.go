@@ -16,6 +16,10 @@
 // A 6h soft deadline guards each pipeline run; phases check deadline at their
 // boundaries and exit cleanly if exceeded (no in-flight ffmpeg / upload is
 // killed mid-task).
+// 已废弃：这条软超时机制已在 2026-05 移除。流水线现在会一直跑到所有 phase
+// 完成或进程被停止；yaml 里的 nightly.max_duration 字段被忽略。理由：单条
+// phase 里的网盘风控冷却可能长达数十分钟（115 列目录 10min × N），强制 6h
+// 切换会让被打断的子任务延后到下一晚，体感上反而更糟。
 //
 // State persistence: the date string of the most recent successfully started
 // run is stored in catalog.settings under the key "nightly.last_run_date".
@@ -25,7 +29,6 @@ package nightly
 
 import (
 	"context"
-	"errors"
 	"log"
 	"sync"
 	"time"
@@ -39,9 +42,6 @@ const (
 	dateLayout = "2006-01-02"
 	// pollInterval is the heartbeat for the natural cron decision loop.
 	pollInterval = time.Minute
-	// minSafeMaxDuration prevents misconfiguration: anything below this would
-	// almost guarantee Phase 2/3 are skipped.
-	minSafeMaxDuration = 5 * time.Minute
 )
 
 // SettingStore is the minimal catalog.Catalog surface we rely on.
@@ -54,9 +54,12 @@ type SettingStore interface {
 // avoids importing main / drives / preview from this package, keeping the
 // dependency graph clean.
 type Config struct {
-	Settings    SettingStore
-	CronHour    int           // 0-23; default 1 (01:00)
-	MaxDuration time.Duration // soft deadline for one pipeline run; default 6h
+	Settings SettingStore
+	CronHour int // 0-23; default 1 (01:00)
+	// MaxDuration 已废弃。早期作为流水线总耗时软超时（默认 6h），到点不再启动后
+	// 续 phase。当前实现忽略此字段 —— 流水线一直跑到所有 phase 完成或 ctx 取消。
+	// 字段保留是为了让旧 config.yaml 加载时不报 "unknown field"。
+	MaxDuration time.Duration
 
 	// ListScanTargets returns the drive IDs to run Phase 1 on, in deterministic
 	// order. Should exclude spider91 and localupload drives.
@@ -98,12 +101,6 @@ func New(cfg Config) *Runner {
 	if cfg.CronHour < 0 || cfg.CronHour > 23 {
 		cfg.CronHour = 1
 	}
-	if cfg.MaxDuration <= 0 {
-		cfg.MaxDuration = 6 * time.Hour
-	}
-	if cfg.MaxDuration < minSafeMaxDuration {
-		cfg.MaxDuration = minSafeMaxDuration
-	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -119,7 +116,7 @@ func New(cfg Config) *Runner {
 func (r *Runner) Run(ctx context.Context) {
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
-	log.Printf("[nightly] runner started; cron_hour=%d max_duration=%s", r.cfg.CronHour, r.cfg.MaxDuration)
+	log.Printf("[nightly] runner started; cron_hour=%d", r.cfg.CronHour)
 	for {
 		select {
 		case <-ctx.Done():
@@ -171,6 +168,8 @@ func shouldRun(now time.Time, lastRunDate string) bool {
 // in progress, the call returns immediately (logged once). After completion
 // (regardless of success), today's date is recorded so subsequent triggers
 // the same calendar day are skipped.
+//
+// 流水线没有总耗时上限：一直跑到 ctx 取消（进程退出）或所有 phase 完成。
 func (r *Runner) runPipelineLocked(ctx context.Context, manual bool) {
 	if !r.runMu.TryLock() {
 		log.Printf("[nightly] another pipeline is already running, skipping this trigger")
@@ -179,17 +178,14 @@ func (r *Runner) runPipelineLocked(ctx context.Context, manual bool) {
 	defer r.runMu.Unlock()
 
 	started := r.cfg.Now()
-	deadline := started.Add(r.cfg.MaxDuration)
-	runCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
 
 	mode := "scheduled"
 	if manual {
 		mode = "manual"
 	}
-	log.Printf("[nightly] pipeline (%s) start; soft deadline=%s", mode, deadline.Format(time.RFC3339))
+	log.Printf("[nightly] pipeline (%s) start", mode)
 
-	r.runPipeline(runCtx)
+	r.runPipeline(ctx)
 
 	finished := r.cfg.Now()
 	log.Printf("[nightly] pipeline (%s) finish; took=%s", mode, finished.Sub(started).Round(time.Second))
@@ -272,16 +268,12 @@ func (r *Runner) runPipeline(ctx context.Context) {
 	}
 }
 
-// checkDeadline returns true when ctx is already done (i.e., the soft deadline
-// has been reached or the runner is shutting down) and the caller should bail.
+// checkDeadline returns true when ctx is already done (runner shutting down or
+// upstream cancel) and the caller should bail. 已不再有"流水线总耗时上限"语义；
+// 函数名保留是为了改动最小，仅作 ctx 取消检测。
 func (r *Runner) checkDeadline(ctx context.Context, phase string) bool {
 	if err := ctx.Err(); err != nil {
-		switch {
-		case errors.Is(err, context.DeadlineExceeded):
-			log.Printf("[nightly] %s: soft deadline reached, bailing out", phase)
-		default:
-			log.Printf("[nightly] %s: ctx done (%v), bailing out", phase, err)
-		}
+		log.Printf("[nightly] %s: ctx done (%v), bailing out", phase, err)
 		return true
 	}
 	return false
@@ -293,11 +285,7 @@ func (r *Runner) waitIdle(ctx context.Context, phase string) error {
 		return nil
 	}
 	if err := r.cfg.WaitPreviewQueuesIdle(ctx); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("[nightly] %s: soft deadline reached while waiting for preview queues", phase)
-		} else {
-			log.Printf("[nightly] %s: wait preview queues: %v", phase, err)
-		}
+		log.Printf("[nightly] %s: wait preview queues: %v", phase, err)
 		return err
 	}
 	return nil
