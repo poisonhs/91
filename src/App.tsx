@@ -3,7 +3,6 @@ import { SkyStarfield } from "@/components/SkyStarfield";
 import HomePage from "@/pages/HomePage";
 import ListingPage from "@/pages/ListingPage";
 import ShortsPage from "@/pages/ShortsPage";
-import UploadPage from "@/pages/UploadPage";
 import VideoDetailPage from "@/pages/VideoDetailPage";
 import { AdminLayout } from "@/admin/AdminLayout";
 import { LoginPage as AdminLoginPage } from "@/admin/LoginPage";
@@ -49,14 +48,6 @@ export default function App() {
           element={
             <RequireUserAuth>
               <ShortsPage />
-            </RequireUserAuth>
-          }
-        />
-        <Route
-          path="/upload"
-          element={
-            <RequireUserAuth>
-              <UploadPage />
             </RequireUserAuth>
           }
         />

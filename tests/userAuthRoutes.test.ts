@@ -7,6 +7,10 @@ const adminRequireSource = readFileSync(
   new URL("../src/admin/RequireAuth.tsx", import.meta.url),
   "utf8"
 );
+const mainNavSource = readFileSync(
+  new URL("../src/components/MainNav.tsx", import.meta.url),
+  "utf8"
+);
 
 test("app uses separate viewer and admin login routes", () => {
   assert.match(appSource, /path="\/login"/);
@@ -19,4 +23,11 @@ test("app uses separate viewer and admin login routes", () => {
 test("admin auth redirects to admin login page", () => {
   assert.match(adminRequireSource, /to="\/admin\/login"/);
   assert.doesNotMatch(adminRequireSource, /to="\/login"/);
+});
+
+test("viewer app does not expose upload or admin navigation entry points", () => {
+  assert.doesNotMatch(appSource, /path="\/upload"/);
+  assert.doesNotMatch(appSource, /UploadPage/);
+  assert.doesNotMatch(mainNavSource, /to:\s*"\/upload"/);
+  assert.doesNotMatch(mainNavSource, /to:\s*"\/admin"/);
 });

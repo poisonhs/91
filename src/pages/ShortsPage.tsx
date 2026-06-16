@@ -2,23 +2,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ChevronLeft,
-  Heart,
   Maximize,
   Minimize,
   Volume2,
   VolumeX,
-  EyeOff,
   Info,
   Sparkles,
-  AlertCircle,
 } from "lucide-react";
 import {
   fetchShortsNext,
-  hideVideo,
   type ShortsItem,
 } from "@/data/videos";
 import { viewerJSON } from "@/auth/request";
 import "@/styles/shorts.css";
+
+void viewerJSON;
 
 // 短视频"已看过"列表存在 localStorage，与普通详情页历史完全独立。
 const SEEN_STORAGE_KEY = "shorts_seen_ids_v1";
@@ -185,11 +183,6 @@ export default function ShortsPage() {
   );
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // 本次会话内已经点过赞的视频 id 集合。
-  // 与后端的真实 likes 字段同步——后端是单纯计数器，前端在这里防重避免连发。
-  // 用户在操作栏点取消时会从这里移除，允许之后再次点赞。
-  const likedIdsRef = useRef<Set<string>>(new Set());
-
   useEffect(() => {
     activeIndexRef.current = activeIndex;
   }, [activeIndex]);
@@ -249,46 +242,15 @@ export default function ShortsPage() {
     });
   }, []);
 
-  /**
-   * 切换点赞状态。
-   * - liked=true：发 POST /api/video/:id/like
-   * - liked=false：发 DELETE /api/video/:id/like
-   * 返回服务端最新 likes 值；请求失败返回 null（调用方可回滚 UI）。
-   */
   const handleLikeToggle = useCallback(
-    async (videoId: string, liked: boolean): Promise<number | null> => {
-      // 维护本地集合以保持双击去重逻辑（已经在集合里就不会重复点赞）
-      if (liked) {
-        likedIdsRef.current.add(videoId);
-      } else {
-        likedIdsRef.current.delete(videoId);
-      }
-      try {
-        const data = await viewerJSON<{ likes?: number }>(
-          `/api/video/${encodeURIComponent(videoId)}/like`,
-          {
-            method: liked ? "POST" : "DELETE",
-          }
-        );
-        return typeof data.likes === "number" ? data.likes : null;
-      } catch {
-        // 请求失败：回滚集合，让 Slide 自己回滚 UI
-        if (liked) {
-          likedIdsRef.current.delete(videoId);
-        } else {
-          likedIdsRef.current.add(videoId);
-        }
-        return null;
-      }
-    },
+    async (_videoId: string, _liked: boolean): Promise<number | null> => null,
     []
   );
 
-  /** 当前 id 是否已经在本次会话内点过赞（供 Slide 切换 active 时同步状态） */
-  const hasLiked = useCallback(
-    (videoId: string) => likedIdsRef.current.has(videoId),
-    []
-  );
+  const hasLiked = useCallback((_videoId: string) => false, []);
+
+  void handleLikeToggle;
+  void hasLiked;
 
   /**
    * 向后端请求下一批不重复的短视频，追加到 items 末尾。
@@ -462,12 +424,6 @@ export default function ShortsPage() {
       } else if (e.key === "f" || e.key === "F") {
         e.preventDefault();
         toggleFullscreen();
-      } else if (e.key === "l" || e.key === "L") {
-        e.preventDefault();
-        const heartBtn = containerRef.current?.querySelector(`[data-index="${activeIndex}"] .shorts-slide__action`) as HTMLButtonElement | null;
-        if (heartBtn) {
-          heartBtn.click();
-        }
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         const activeVideo = videoRefs.current.get(activeIndex);
@@ -691,19 +647,6 @@ export default function ShortsPage() {
     toggleFullscreen();
   }
 
-  const handleHideSuccess = useCallback((idx: number) => {
-    showHud("已选择不再展示，正在滑至下一首...", <EyeOff size={16} />);
-    const nextIdx = idx + 1;
-    if (nextIdx < items.length) {
-      setTimeout(() => {
-        const nextSlide = containerRef.current?.querySelector(`[data-index="${nextIdx}"]`);
-        if (nextSlide) {
-          nextSlide.scrollIntoView({ behavior: "smooth" });
-        }
-      }, 700);
-    }
-  }, [items.length, showHud]);
-
   const videoWindow = getVideoWindowBounds(cacheWindowHighIndex, items.length);
 
   return (
@@ -810,15 +753,11 @@ export default function ShortsPage() {
               setMuted={setMuted}
               setVolume={setVolume}
               videoRef={setVideoRef(index)}
-              onLikeToggle={handleLikeToggle}
-              hasLiked={hasLiked}
-              onHideSuccess={handleHideSuccess}
               onActiveReadyForPreload={handleActiveReadyForPreload}
               onActiveNeedsPriority={handleActiveNeedsPriority}
               onSourceCached={handleSourceCached}
               onUserPausedChange={setUserPausedForIndex}
               isVideoPausedByUser={isVideoPausedByUser}
-              showHud={showHud}
             />
           );
         })}
@@ -839,21 +778,12 @@ type SlideProps = {
   setMuted: (muted: boolean) => void;
   setVolume: (volume: number) => void;
   videoRef: (el: HTMLVideoElement | null) => void;
-  /**
-   * 切换点赞。第二参数 true 表示点赞，false 表示取消。
-   * 返回服务端最新 likes 值；null 表示请求失败，调用方应回滚 UI。
-   */
-  onLikeToggle: (videoId: string, liked: boolean) => Promise<number | null>;
-  /** 父组件查询某 id 是否已经在本次会话内点过赞 */
-  hasLiked: (videoId: string) => boolean;
-  onHideSuccess: (index: number) => void;
   onActiveReadyForPreload: (index: number) => void;
   onActiveNeedsPriority: (index: number) => void;
   /** 本条视频在浏览器里已有可复用缓冲，之后在视频窗口内保留 src */
   onSourceCached: (videoId: string) => void;
   onUserPausedChange: (index: number, isPaused: boolean) => void;
   isVideoPausedByUser: (index: number) => boolean;
-  showHud: (text: string, icon?: React.ReactNode) => void;
 };
 
 /**
@@ -875,15 +805,11 @@ function ShortsSlide({
   setMuted,
   setVolume,
   videoRef,
-  onLikeToggle,
-  hasLiked,
-  onHideSuccess,
   onActiveReadyForPreload,
   onActiveNeedsPriority,
   onSourceCached,
   onUserPausedChange,
   isVideoPausedByUser,
-  showHud,
 }: SlideProps) {
   const localRef = useRef<HTMLVideoElement | null>(null);
   const [paused, setPaused] = useState(false);
@@ -891,8 +817,6 @@ function ShortsSlide({
 
   // 视频缓冲状态
   const [isBuffering, setIsBuffering] = useState(false);
-  // 是否已经被隐藏/拉黑
-  const [isMarkedHidden, setIsMarkedHidden] = useState(false);
 
   // 进度状态。播放时由 timeupdate 更新；拖动时由用户输入更新
   const [duration, setDuration] = useState(0);
@@ -901,30 +825,6 @@ function ShortsSlide({
   const scrubbingRef = useRef(false);
   // 拖动开始时是否在播：用于拖完后判断要不要 resume
   const wasPlayingRef = useRef(true);
-
-  // 点赞数和"是否已点过赞"状态。
-  // 初始 likes 取自后端返回的列表项；isLiked 仅控制视觉态，
-  // 真正的防重在父组件 likedIdsRef 里，这里只信任父返回的回执。
-  const [likes, setLikes] = useState(item.likes ?? 0);
-  const [isLiked, setIsLiked] = useState(false);
-  // 屏幕中央的心形飞起动画（双击点赞时显示）
-  const [heartBurst, setHeartBurst] = useState<{
-    key: number;
-    x: number;
-    y: number;
-  } | null>(null);
-
-  // 单击和双击的延迟分发：第一次点击挂在定时器里，
-  // 300ms 内有第二次就当双击点赞，否则当单击 toggle play
-  const clickTimerRef = useRef<number | null>(null);
-  const lastClickAtRef = useRef(0);
-
-  // 切换视频时把 likes 同步到新视频的初始值；
-  // isLiked 取自父组件的全局集合，这样切走再切回 / 同一 id 重复出现仍能保持视觉态
-  useEffect(() => {
-    setLikes(item.likes ?? 0);
-    setIsLiked(hasLiked(item.id));
-  }, [item.id, item.likes, hasLiked]);
 
   const setRef = useCallback(
     (el: HTMLVideoElement | null) => {
@@ -968,17 +868,6 @@ function ShortsSlide({
       applyVideoAudioState(video, muted, volume);
     }
   }, [muted, volume, isActive]);
-
-  // 离开活跃或者被隐藏时暂停视频
-  useEffect(() => {
-    if (isMarkedHidden && localRef.current) {
-      try {
-        localRef.current.pause();
-      } catch {
-        // ignore
-      }
-    }
-  }, [isMarkedHidden]);
 
   // 监听 video 的时长 / 进度 / 缓冲状态 / 音量物理键变化。
   // VIDEO_WINDOW_SIZE 会让窗口外的 slide 先以海报占位，之后才挂载 video 壳；
@@ -1182,133 +1071,8 @@ function ShortsSlide({
     }
   }
 
-  function clearClickTimer() {
-    if (clickTimerRef.current !== null) {
-      window.clearTimeout(clickTimerRef.current);
-      clickTimerRef.current = null;
-    }
-  }
-
-  /**
-   * 单击 / 双击分发：
-   * - 第一次点击：挂一个 280ms 定时器，到时如果还没第二次点击就 toggle 播放
-   * - 第二次点击（280ms 内）：清掉定时器，当作双击点赞，不切换播放状态
-   */
-  function handleSlideClick(e: React.MouseEvent<HTMLElement>) {
-    // 隐藏状态下不处理点击
-    if (isMarkedHidden) return;
-
-    const now = Date.now();
-    const delta = now - lastClickAtRef.current;
-    lastClickAtRef.current = now;
-
-    // 双击命中
-    if (delta < 280 && clickTimerRef.current !== null) {
-      clearClickTimer();
-      // 在双击位置弹心形动画
-      const rect = e.currentTarget.getBoundingClientRect();
-      handleDoubleClickLike(e.clientX - rect.left, e.clientY - rect.top);
-      return;
-    }
-
-    // 单击挂起，等是否有第二次
-    clearClickTimer();
-    clickTimerRef.current = window.setTimeout(() => {
-      clickTimerRef.current = null;
-      togglePlayInternal();
-    }, 280);
-  }
-
-  // 组件卸载时清理定时器
-  useEffect(() => {
-    return () => clearClickTimer();
-  }, []);
-
-  function handleDoubleClickLike(x: number, y: number) {
-    // 触发飞心动画（每次都给一个新 key 强制重启动画）
-    setHeartBurst({ key: Date.now(), x, y });
-    window.setTimeout(() => setHeartBurst(null), 700);
-
-    // 双击只表达喜爱：已经点赞了就只播动画不取消，不重复发请求；
-    // 真要取消请点右下角心形按钮
-    if (isLiked) return;
-    setIsLiked(true);
-    setLikes((n) => n + 1);
-    void onLikeToggle(item.id, true).then((serverLikes) => {
-      if (serverLikes !== null) {
-        setLikes(serverLikes);
-      } else {
-        // 请求失败：回滚视觉态
-        setIsLiked(false);
-        setLikes((n) => Math.max(0, n - 1));
-      }
-    });
-  }
-
-  /**
-   * 点击右下角心形按钮：在"已点赞 / 未点赞"之间切换。
-   */
-  function handleHeartClick(e: React.MouseEvent<HTMLButtonElement>) {
-    e.stopPropagation();
-    const willLike = !isLiked;
-    if (willLike) {
-      // 视觉立即响应 + 飞心动画（让按钮位置发出心形）
-      const slideRect = (
-        e.currentTarget.closest(".shorts-slide") as HTMLElement | null
-      )?.getBoundingClientRect();
-      const btnRect = e.currentTarget.getBoundingClientRect();
-      if (slideRect) {
-        const x = btnRect.left + btnRect.width / 2 - slideRect.left;
-        const y = btnRect.top + btnRect.height / 2 - slideRect.top;
-        setHeartBurst({ key: Date.now(), x, y });
-        window.setTimeout(() => setHeartBurst(null), 700);
-      }
-      setIsLiked(true);
-      setLikes((n) => n + 1);
-      void onLikeToggle(item.id, true).then((serverLikes) => {
-        if (serverLikes !== null) {
-          setLikes(serverLikes);
-        } else {
-          setIsLiked(false);
-          setLikes((n) => Math.max(0, n - 1));
-        }
-      });
-    } else {
-      // 取消点赞：视觉立即响应，请求失败再回滚
-      setIsLiked(false);
-      setLikes((n) => Math.max(0, n - 1));
-      void onLikeToggle(item.id, false).then((serverLikes) => {
-        if (serverLikes !== null) {
-          setLikes(serverLikes);
-        } else {
-          setIsLiked(true);
-          setLikes((n) => n + 1);
-        }
-      });
-    }
-  }
-
-
-
-  /**
-   * 拉黑并隐藏视频
-   */
-  function handleHideClick(e: React.MouseEvent<HTMLButtonElement>) {
-    e.stopPropagation();
-    setIsMarkedHidden(true);
-    void hideVideo(item.id)
-      .then((res) => {
-        if (res.ok) {
-          onHideSuccess(index);
-        } else {
-          setIsMarkedHidden(false);
-          showHud("操作失败，请重试", <AlertCircle size={16} />);
-        }
-      })
-      .catch(() => {
-        setIsMarkedHidden(false);
-        showHud("网络请求出错", <AlertCircle size={16} />);
-      });
+  function handleSlideClick() {
+    togglePlayInternal();
   }
 
   // ---- 进度条拖动 ----
@@ -1440,18 +1204,9 @@ function ShortsSlide({
       )}
 
       {/* 视频加载/缓冲旋转器 */}
-      {isBuffering && isActive && shouldLoad && !isMarkedHidden && (
+      {isBuffering && isActive && shouldLoad && (
         <div className="shorts-slide__buffering" aria-hidden="true">
           <ShortsLoadingSpinner size={30} />
-        </div>
-      )}
-
-      {/* 不再展示屏蔽遮罩 */}
-      {isMarkedHidden && (
-        <div className="shorts-slide__hidden-overlay" onClick={(e) => e.stopPropagation()}>
-          <EyeOff size={38} style={{ color: "#ff4060", marginBottom: "8px" }} />
-          <div className="shorts-slide__hidden-title">已隐藏该视频</div>
-          <div className="shorts-slide__hidden-desc">系统将不会再次在任何地方向您展示此视频</div>
         </div>
       )}
 
@@ -1488,51 +1243,10 @@ function ShortsSlide({
         <div className="shorts-drive-badge" title={`来源: ${item.sourceLabel || "本地"}`}>
           {getDriveShortName(item.sourceLabel || "本地")}
         </div>
-
-        {/* 点赞 */}
-        <button
-          type="button"
-          className={`shorts-slide__action ${isLiked ? "is-liked" : ""}`}
-          aria-label={isLiked ? "取消点赞" : "点赞"}
-          aria-pressed={isLiked}
-          onClick={handleHeartClick}
-        >
-          <Heart
-            size={24}
-            fill={isLiked ? "currentColor" : "none"}
-            strokeWidth={2}
-          />
-          <span className="shorts-slide__action-count">{formatCount(likes)}</span>
-        </button>
-
-
-
-        {/* 不再展示 */}
-        <button
-          type="button"
-          className="shorts-slide__action"
-          aria-label="不再展示"
-          onClick={handleHideClick}
-        >
-          <EyeOff size={22} />
-          <span className="shorts-slide__action-count">隐藏</span>
-        </button>
       </aside>
 
-      {/* 双击点赞时弹起的心形动画 */}
-      {heartBurst && (
-        <div
-          key={heartBurst.key}
-          className="shorts-slide__heart-burst"
-          style={{ left: heartBurst.x, top: heartBurst.y }}
-          aria-hidden="true"
-        >
-          <Heart size={88} fill="currentColor" strokeWidth={0} />
-        </div>
-      )}
-
       {/* 进度条 */}
-      {isActive && shouldLoad && !isMarkedHidden && (
+      {isActive && shouldLoad && (
         <div
           className={`shorts-slide__progress ${
             scrubbing ? "is-scrubbing" : ""
@@ -1750,14 +1464,6 @@ function formatClock(seconds: number) {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-/** 简易的点赞数缩写：1.2k / 3.4w，避免 5 位数挤爆右侧操作栏 */
-function formatCount(n: number) {
-  if (!Number.isFinite(n) || n <= 0) return "0";
-  if (n < 1000) return String(n);
-  if (n < 10000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
-  return (n / 10000).toFixed(1).replace(/\.0$/, "") + "w";
 }
 
 /** 识别云盘缩写名称 */

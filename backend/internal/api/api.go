@@ -227,12 +227,7 @@ func (s *Server) RegisterRoutes(r chi.Router, a *auth.UserAuthenticator) {
 		r.Get("/api/home", s.handleHome)
 		r.Get("/api/list", s.handleList)
 		r.Get("/api/video/{id}", s.handleVideoDetail)
-		r.Put("/api/video/{id}/tags", s.handleUpdateVideoTags)
-		r.Post("/api/video/{id}/like", s.handleLike)
-		r.Delete("/api/video/{id}/like", s.handleUnlike)
 		r.Post("/api/video/{id}/view", s.handleView)
-		r.Post("/api/video/{id}/hide", s.handleHideVideo)
-		r.Post("/api/upload", s.handleUploadVideo)
 		r.Get("/api/tags", s.handleTags)
 		r.Post("/api/shorts/next", s.handleShortsNext)
 

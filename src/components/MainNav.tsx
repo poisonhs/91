@@ -1,19 +1,10 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
-import {
-  Film,
-  Menu,
-  Settings,
-  Sparkles,
-  Upload,
-  X,
-} from "lucide-react";
+import { Film, Menu, Sparkles, X } from "lucide-react";
 
 const navItems = [
-  { to: "/shorts", label: "短视频", icon: Sparkles },
-  { to: "/upload", label: "上传", icon: Upload },
-  { to: "/list", label: "视频", icon: Film },
-  { to: "/admin", label: "后台", icon: Settings },
+  { to: "/shorts", label: "Shorts", icon: Sparkles },
+  { to: "/list", label: "Videos", icon: Film },
 ];
 
 export function MainNav() {
@@ -42,7 +33,9 @@ export function MainNav() {
                   if (to === "/shorts") {
                     const el = document.documentElement;
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    const fn = el.requestFullscreen?.bind(el) || (el as any).webkitRequestFullscreen?.bind(el);
+                    const fn =
+                      el.requestFullscreen?.bind(el) ||
+                      (el as any).webkitRequestFullscreen?.bind(el);
                     if (fn) {
                       try {
                         const ret = fn();
@@ -65,7 +58,7 @@ export function MainNav() {
 
         <button
           className="main-nav__toggle"
-          aria-label={open ? "关闭菜单" : "打开菜单"}
+          aria-label={open ? "Close menu" : "Open menu"}
           aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
         >

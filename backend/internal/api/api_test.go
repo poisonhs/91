@@ -82,6 +82,39 @@ func TestThemeRouteRemainsPublic(t *testing.T) {
 	}
 }
 
+func TestViewerRoutesAreWatchOnly(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	srv := &Server{Catalog: cat}
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	r := chi.NewRouter()
+	srv.RegisterRoutes(r, viewerAuth)
+
+	cookie := viewerSessionCookie(t, viewerAuth)
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/api/upload"},
+		{method: http.MethodPut, path: "/api/video/video-1/tags"},
+		{method: http.MethodPost, path: "/api/video/video-1/like"},
+		{method: http.MethodDelete, path: "/api/video/video-1/like"},
+		{method: http.MethodPost, path: "/api/video/video-1/hide"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+		req.AddCookie(cookie)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want %d", tc.method, tc.path, rr.Code, http.StatusNotFound)
+		}
+	}
+}
+
 func TestVideoSourceUsesDirectStreamForAvi(t *testing.T) {
 	v := &catalog.Video{
 		ID:      "video-1",
@@ -1358,6 +1391,20 @@ func requestWithRouteParam(method, target, key, value string, body *strings.Read
 	rctx.URLParams.Add(key, value)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	return req
+}
+
+func viewerSessionCookie(t *testing.T, a *auth.UserAuthenticator) *http.Cookie {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(``))
+	if _, err := a.Register(rr, req, "viewer", "secret123"); err != nil {
+		t.Fatalf("register viewer: %v", err)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected viewer auth cookie")
+	}
+	return cookies[0]
 }
 
 func multipartUploadRequest(t *testing.T, fields map[string]string, fileName, fileContent string) *http.Request {
