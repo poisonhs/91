@@ -20,6 +20,15 @@ type Catalog struct {
 	db *sql.DB
 }
 
+type FrontendUser struct {
+	ID           string
+	Username     string
+	PasswordHash string
+	Status       string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type CrawlerAssetCounts struct {
 	Total       int
 	Local       int
@@ -2148,6 +2157,88 @@ func (c *Catalog) ValidateSession(ctx context.Context, token string) (bool, erro
 
 func (c *Catalog) DeleteSession(ctx context.Context, token string) error {
 	_, err := c.db.ExecContext(ctx, `DELETE FROM admin_sessions WHERE token = ?`, token)
+	return err
+}
+
+// ---------- Frontend user auth ----------
+
+func (c *Catalog) CreateUser(ctx context.Context, id, username, passwordHash string) error {
+	now := time.Now().UnixMilli()
+	_, err := c.db.ExecContext(ctx, `
+INSERT INTO users (id, username, password_hash, status, created_at, updated_at)
+VALUES (?, ?, ?, 'active', ?, ?)
+`, id, strings.TrimSpace(username), passwordHash, now, now)
+	return err
+}
+
+func (c *Catalog) GetUserByUsername(ctx context.Context, username string) (*FrontendUser, error) {
+	var user FrontendUser
+	var createdAt, updatedAt int64
+	err := c.db.QueryRowContext(ctx, `
+SELECT id, username, password_hash, status, created_at, updated_at
+FROM users
+WHERE username = ?
+`, strings.TrimSpace(username)).Scan(
+		&user.ID,
+		&user.Username,
+		&user.PasswordHash,
+		&user.Status,
+		&createdAt,
+		&updatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	user.CreatedAt = time.UnixMilli(createdAt)
+	user.UpdatedAt = time.UnixMilli(updatedAt)
+	return &user, nil
+}
+
+func (c *Catalog) CreateUserSession(ctx context.Context, token, userID string, ttl time.Duration) error {
+	now := time.Now()
+	_, err := c.db.ExecContext(ctx, `
+INSERT INTO user_sessions (token, user_id, created_at, expires_at)
+VALUES (?, ?, ?, ?)
+`, token, userID, now.UnixMilli(), now.Add(ttl).UnixMilli())
+	return err
+}
+
+func (c *Catalog) GetUserBySessionToken(ctx context.Context, token string) (*FrontendUser, bool, error) {
+	var user FrontendUser
+	var createdAt, updatedAt, expiresAt int64
+	err := c.db.QueryRowContext(ctx, `
+SELECT u.id, u.username, u.password_hash, u.status, u.created_at, u.updated_at, s.expires_at
+FROM user_sessions s
+JOIN users u ON u.id = s.user_id
+WHERE s.token = ?
+`, token).Scan(
+		&user.ID,
+		&user.Username,
+		&user.PasswordHash,
+		&user.Status,
+		&createdAt,
+		&updatedAt,
+		&expiresAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if time.Now().UnixMilli() >= expiresAt {
+		return nil, false, nil
+	}
+	user.CreatedAt = time.UnixMilli(createdAt)
+	user.UpdatedAt = time.UnixMilli(updatedAt)
+	return &user, true, nil
+}
+
+func (c *Catalog) DeleteUserSession(ctx context.Context, token string) error {
+	_, err := c.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE token = ?`, token)
 	return err
 }
 

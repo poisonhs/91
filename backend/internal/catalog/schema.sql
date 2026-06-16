@@ -150,6 +150,26 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     expires_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    password_hash TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
+    ON user_sessions(user_id);
+
 -- 管理后台登录永久封禁 IP
 CREATE TABLE IF NOT EXISTS banned_login_ips (
     ip         TEXT PRIMARY KEY,
