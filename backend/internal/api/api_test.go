@@ -17,11 +17,70 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/video-site/backend/internal/auth"
 	"github.com/video-site/backend/internal/catalog"
 	"github.com/video-site/backend/internal/drives"
 	"github.com/video-site/backend/internal/mediaasset"
 	"github.com/video-site/backend/internal/proxy"
 )
+
+func TestRegisterRoutesExposeViewerRegisterLoginLogoutAndMe(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	srv := &Server{Catalog: cat}
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	r := chi.NewRouter()
+	srv.RegisterRoutes(r, viewerAuth)
+
+	body := strings.NewReader(`{"username":"viewer","password":"secret123"}`)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/auth/register", body))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("register status = %d body = %s", rr.Code, rr.Body.String())
+	}
+	if len(rr.Result().Cookies()) == 0 || rr.Result().Cookies()[0].Name != "vs_user" {
+		t.Fatal("expected vs_user cookie from register")
+	}
+}
+
+func TestProtectedViewerRoutesRequireVsUserCookie(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	srv := &Server{Catalog: cat}
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	r := chi.NewRouter()
+	srv.RegisterRoutes(r, viewerAuth)
+
+	for _, path := range []string{"/api/home", "/api/list?page=1&size=12", "/p/thumb/video-1"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d, want %d", path, rr.Code, http.StatusUnauthorized)
+		}
+	}
+}
+
+func TestThemeRouteRemainsPublic(t *testing.T) {
+	srv := &Server{GetTheme: func() string { return "sky" }}
+	r := chi.NewRouter()
+	srv.RegisterRoutes(r, &auth.UserAuthenticator{})
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/settings/theme", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+}
 
 func TestVideoSourceUsesDirectStreamForAvi(t *testing.T) {
 	v := &catalog.Video{

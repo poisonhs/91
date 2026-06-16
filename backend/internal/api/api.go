@@ -130,11 +130,97 @@ type Comment struct {
 	Likes     int    `json:"likes,omitempty"`
 }
 
+type viewerAuthReq struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (s *Server) handleViewerRegister(a *auth.UserAuthenticator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body viewerAuthReq
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		username := strings.TrimSpace(body.Username)
+		if username == "" {
+			http.Error(w, "username is required", http.StatusBadRequest)
+			return
+		}
+		if len(body.Password) < 6 {
+			http.Error(w, "password must be at least 6 characters", http.StatusBadRequest)
+			return
+		}
+		user, err := a.Register(w, r, username, body.Password)
+		if err != nil {
+			errText := strings.ToLower(err.Error())
+			if strings.Contains(errText, "unique") || strings.Contains(errText, "constraint") {
+				http.Error(w, "username already exists", http.StatusConflict)
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": user.Username})
+	}
+}
+
+func (s *Server) handleViewerLogin(a *auth.UserAuthenticator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body viewerAuthReq
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		ok, err := a.Login(w, r, body.Username, body.Password)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !ok {
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}
+}
+
+func (s *Server) handleViewerLogout(a *auth.UserAuthenticator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a.Logout(w, r)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}
+}
+
+func (s *Server) handleViewerMe(a *auth.UserAuthenticator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, ok, err := a.CurrentUser(r)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !ok {
+			writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"authenticated": true,
+			"username":      user.Username,
+		})
+	}
+}
+
 // RegisterRoutes 挂载前台 REST 路由。前台接口需要登录态。
-func (s *Server) RegisterRoutes(r chi.Router, a *auth.Authenticator) {
+func (s *Server) RegisterRoutes(r chi.Router, a *auth.UserAuthenticator) {
 	// 公开端点：拿当前生效的主题。登录页本身要在挂前就能读，所以单独挂在
 	// 鉴权组之外。只暴露 theme 一个字段，避免泄露其他设置。
 	r.Get("/api/settings/theme", s.handleGetTheme)
+
+	r.Get("/api/settings/theme", s.handleGetTheme)
+	r.Post("/api/auth/register", s.handleViewerRegister(a))
+	r.Post("/api/auth/login", s.handleViewerLogin(a))
+	r.Post("/api/auth/logout", s.handleViewerLogout(a))
+	r.Get("/api/auth/me", s.handleViewerMe(a))
 
 	r.Group(func(r chi.Router) {
 		r.Use(a.Required)

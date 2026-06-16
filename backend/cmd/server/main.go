@@ -108,10 +108,13 @@ func main() {
 	}
 	go app.runFingerprintReconciler(ctx)
 
-	authr := &auth.Authenticator{
+	adminAuth := &auth.Authenticator{
 		Username: cfg.Server.Admin.Username,
 		Password: cfg.Server.Admin.Password,
 		Catalog:  cat,
+	}
+	viewerAuth := &auth.UserAuthenticator{
+		Catalog: cat,
 	}
 	setupRequired := config.RequiresAdminSetup(cfg)
 	var setupMu sync.Mutex
@@ -144,7 +147,7 @@ func main() {
 
 	adminServer := &api.AdminServer{
 		Catalog:         cat,
-		Auth:            authr,
+		Auth:            adminAuth,
 		VersionFilePath: versionFilePath,
 		ImageVersion:    strings.TrimSpace(os.Getenv("VIDEO_IMAGE_VERSION")),
 		GitHubRepo:      githubRepo,
@@ -164,7 +167,7 @@ func main() {
 			}
 			cfg.Server.Admin.Username = username
 			cfg.Server.Admin.Password = password
-			authr.SetCredentials(username, password)
+			adminAuth.SetCredentials(username, password)
 			setupRequired = false
 			return nil
 		},
@@ -289,7 +292,7 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(cfg.Server.AllowedOrigins))
 
-	apiServer.RegisterRoutes(r, authr)
+	apiServer.RegisterRoutes(r, viewerAuth)
 	adminServer.Register(r)
 	mountFrontend(r)
 
