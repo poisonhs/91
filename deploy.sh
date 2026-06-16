@@ -241,18 +241,18 @@ prepare_config() {
 install_frontend() {
   log "installing frontend dependencies"
   if [[ -f "$REPO_DIR/package-lock.json" ]]; then
-    as_deploy_user bash -lc "cd '$REPO_DIR' && npm ci"
+    as_deploy_user bash -c "cd '$REPO_DIR' && npm ci"
   else
-    as_deploy_user bash -lc "cd '$REPO_DIR' && npm install"
+    as_deploy_user bash -c "cd '$REPO_DIR' && npm install"
   fi
 
   log "building frontend"
-  as_deploy_user bash -lc "cd '$REPO_DIR' && npm run build"
+  as_deploy_user bash -c "cd '$REPO_DIR' && npm run build"
 }
 
 build_backend() {
   log "building backend binary"
-  as_deploy_user bash -lc "cd '$REPO_DIR/backend' && go build -o server ./cmd/server"
+  as_deploy_user bash -c "cd '$REPO_DIR/backend' && go build -o server ./cmd/server"
 }
 
 systemd_env_lines() {
