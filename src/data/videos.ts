@@ -1,4 +1,5 @@
 import type { VideoDetail, VideoItem } from "@/types";
+import { viewerFetch, viewerJSON } from "@/auth/request";
 
 // 真实后端接口调用。未配置网盘时，各接口返回空数据。
 export function fetchHomeVideos(excludeIds?: string[]): Promise<VideoItem[]> {
@@ -147,25 +148,18 @@ export function fetchShortsNext(
 }
 
 async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(path, { credentials: "include" });
+  const res = await viewerFetch(path);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 async function apiJSON<T>(path: string, init: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return viewerJSON<T>(path, init);
 }
 
 async function apiForm<T>(path: string, body: FormData): Promise<T> {
-  const res = await fetch(path, {
+  const res = await viewerFetch(path, {
     method: "POST",
-    credentials: "include",
     body,
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

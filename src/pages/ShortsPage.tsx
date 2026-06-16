@@ -17,6 +17,7 @@ import {
   hideVideo,
   type ShortsItem,
 } from "@/data/videos";
+import { viewerJSON } from "@/auth/request";
 import "@/styles/shorts.css";
 
 // 短视频"已看过"列表存在 localStorage，与普通详情页历史完全独立。
@@ -263,15 +264,12 @@ export default function ShortsPage() {
         likedIdsRef.current.delete(videoId);
       }
       try {
-        const res = await fetch(
+        const data = await viewerJSON<{ likes?: number }>(
           `/api/video/${encodeURIComponent(videoId)}/like`,
           {
             method: liked ? "POST" : "DELETE",
-            credentials: "include",
           }
         );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as { likes?: number };
         return typeof data.likes === "number" ? data.likes : null;
       } catch {
         // 请求失败：回滚集合，让 Slide 自己回滚 UI

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import type { VideoDetail } from "@/types";
 import { formatCount } from "@/lib/format";
+import { viewerJSON } from "@/auth/request";
 
 type Props = {
   video: VideoDetail;
@@ -57,12 +58,10 @@ export function VideoActions({
     setLikes((n) => n + 1);
 
     try {
-      const res = await fetch(
+      const data = await viewerJSON<{ likes: number }>(
         `/api/video/${encodeURIComponent(video.id)}/like`,
-        { method: "POST", credentials: "include" }
+        { method: "POST" }
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as { likes: number };
       if (typeof data.likes === "number") {
         setLikes(data.likes);
       }
