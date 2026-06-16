@@ -6,13 +6,16 @@ import ShortsPage from "@/pages/ShortsPage";
 import UploadPage from "@/pages/UploadPage";
 import VideoDetailPage from "@/pages/VideoDetailPage";
 import { AdminLayout } from "@/admin/AdminLayout";
-import { LoginPage } from "@/admin/LoginPage";
+import { LoginPage as AdminLoginPage } from "@/admin/LoginPage";
 import { RequireAuth } from "@/admin/RequireAuth";
 import { DrivesPage } from "@/admin/DrivesPage";
 import { CrawlersPage } from "@/admin/CrawlersPage";
 import { VideosPage } from "@/admin/VideosPage";
 import { TagsPage } from "@/admin/TagsPage";
 import { ThemePage } from "@/admin/ThemePage";
+import { LoginPage as ViewerLoginPage } from "@/auth/LoginPage";
+import { RegisterPage } from "@/auth/RegisterPage";
+import { RequireUserAuth } from "@/auth/RequireUserAuth";
 
 export default function App() {
   return (
@@ -20,47 +23,49 @@ export default function App() {
       {/* 星空蓝主题的固定位置星星层，仅在 data-theme="sky" 下可见 */}
       <SkyStarfield />
       <Routes>
-        <Route path="/login" element={<LoginPage />} />
+        <Route path="/login" element={<ViewerLoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route path="/admin/login" element={<AdminLoginPage />} />
 
         {/* 主站需要登录 */}
         <Route
           path="/"
           element={
-            <RequireAuth>
+            <RequireUserAuth>
               <HomePage />
-            </RequireAuth>
+            </RequireUserAuth>
           }
         />
         <Route
           path="/list"
           element={
-            <RequireAuth>
+            <RequireUserAuth>
               <ListingPage />
-            </RequireAuth>
+            </RequireUserAuth>
           }
         />
         <Route
           path="/shorts"
           element={
-            <RequireAuth>
+            <RequireUserAuth>
               <ShortsPage />
-            </RequireAuth>
+            </RequireUserAuth>
           }
         />
         <Route
           path="/upload"
           element={
-            <RequireAuth>
+            <RequireUserAuth>
               <UploadPage />
-            </RequireAuth>
+            </RequireUserAuth>
           }
         />
         <Route
           path="/video/:id"
           element={
-            <RequireAuth>
+            <RequireUserAuth>
               <VideoDetailPage />
-            </RequireAuth>
+            </RequireUserAuth>
           }
         />
 

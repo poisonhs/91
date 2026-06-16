@@ -3,7 +3,8 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { ToastProvider } from "./admin/ToastContext";
-import { AuthProvider } from "./admin/AuthContext";
+import { AuthProvider as AdminAuthProvider } from "./admin/AuthContext";
+import { AuthProvider as ViewerAuthProvider } from "./auth/AuthContext";
 import { syncThemeFromServer } from "./lib/theme";
 
 import "./styles/tokens.css";
@@ -23,9 +24,11 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>
       <ToastProvider>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
+        <ViewerAuthProvider>
+          <AdminAuthProvider>
+            <App />
+          </AdminAuthProvider>
+        </ViewerAuthProvider>
       </ToastProvider>
     </BrowserRouter>
   </React.StrictMode>

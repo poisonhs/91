@@ -45,7 +45,8 @@ export function LoginPage() {
 
   // 已登录：回到来源页，或默认去首页
   if (status === "authed") {
-    const from = (location.state as { from?: string } | null)?.from ?? "/";
+    const from =
+      (location.state as { from?: string } | null)?.from ?? "/admin/drives";
     return <Navigate to={from} replace />;
   }
 
@@ -67,7 +68,8 @@ export function LoginPage() {
         await login(u, p);
         show("登录成功", "success");
       }
-      const from = (location.state as { from?: string } | null)?.from ?? "/";
+      const from =
+        (location.state as { from?: string } | null)?.from ?? "/admin/drives";
       navigate(from, { replace: true });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "登录失败");
