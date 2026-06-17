@@ -116,7 +116,7 @@ export function AdminLayout() {
             >
               <span className="admin-nav__icon"><Users size={16} /></span>
               <span className="admin-nav__text">
-                <span className="admin-nav__title">鐢ㄦ埛绠＄悊</span>
+                <span className="admin-nav__title">用户管理</span>
               </span>
             </NavLink>
             <NavLink
