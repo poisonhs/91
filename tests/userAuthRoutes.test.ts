@@ -11,6 +11,10 @@ const mainNavSource = readFileSync(
   new URL("../src/components/MainNav.tsx", import.meta.url),
   "utf8"
 );
+const registerPageSource = readFileSync(
+  new URL("../src/auth/RegisterPage.tsx", import.meta.url),
+  "utf8"
+);
 
 test("app uses separate viewer and admin login routes", () => {
   assert.match(appSource, /path="\/login"/);
@@ -30,4 +34,9 @@ test("viewer app does not expose upload or admin navigation entry points", () =>
   assert.doesNotMatch(appSource, /UploadPage/);
   assert.doesNotMatch(mainNavSource, /to:\s*"\/upload"/);
   assert.doesNotMatch(mainNavSource, /to:\s*"\/admin"/);
+});
+
+test("viewer register page requires an invite code field", () => {
+  assert.match(registerPageSource, /invite/i);
+  assert.match(registerPageSource, /viewer-register-invite/);
 });

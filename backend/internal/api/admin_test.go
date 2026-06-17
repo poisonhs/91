@@ -259,7 +259,11 @@ func TestHandleResetUserPasswordRehashesPasswordAndClearsSessions(t *testing.T) 
 	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(``))
-	user, err := viewerAuth.Register(rr, req, "viewer", "secret123")
+	invite, err := cat.CreateInviteCode(context.Background())
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	user, err := viewerAuth.Register(rr, req, "viewer", "secret123", invite.Code)
 	if err != nil {
 		t.Fatalf("register viewer: %v", err)
 	}

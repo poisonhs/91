@@ -29,7 +29,7 @@ type UserAuthenticator struct {
 	Now     func() time.Time
 }
 
-func (a *UserAuthenticator) Register(w http.ResponseWriter, r *http.Request, username, password string) (*Viewer, error) {
+func (a *UserAuthenticator) Register(w http.ResponseWriter, r *http.Request, username, password, inviteCode string) (*Viewer, error) {
 	username = strings.TrimSpace(username)
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -39,7 +39,7 @@ func (a *UserAuthenticator) Register(w http.ResponseWriter, r *http.Request, use
 	if err != nil {
 		return nil, err
 	}
-	if err := a.Catalog.CreateUser(r.Context(), userID, username, string(hash)); err != nil {
+	if err := a.Catalog.CreateUserWithInviteCode(r.Context(), userID, username, string(hash), inviteCode); err != nil {
 		return nil, err
 	}
 	if err := a.issueSession(w, r.Context(), userID); err != nil {

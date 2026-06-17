@@ -36,7 +36,12 @@ func TestRegisterRoutesExposeViewerRegisterLoginLogoutAndMe(t *testing.T) {
 	r := chi.NewRouter()
 	srv.RegisterRoutes(r, viewerAuth)
 
-	body := strings.NewReader(`{"username":"viewer","password":"secret123"}`)
+	invite, err := cat.CreateInviteCode(context.Background())
+	if err != nil {
+		t.Fatalf("create invite code: %v", err)
+	}
+
+	body := strings.NewReader(`{"username":"viewer","password":"secret123","inviteCode":"` + invite.Code + `"}`)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/auth/register", body))
 
@@ -45,6 +50,76 @@ func TestRegisterRoutesExposeViewerRegisterLoginLogoutAndMe(t *testing.T) {
 	}
 	if len(rr.Result().Cookies()) == 0 || rr.Result().Cookies()[0].Name != "vs_user" {
 		t.Fatal("expected vs_user cookie from register")
+	}
+}
+
+func TestRegisterRoutesRequireInviteCode(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	srv := &Server{Catalog: cat}
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	r := chi.NewRouter()
+	srv.RegisterRoutes(r, viewerAuth)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(
+		http.MethodPost,
+		"/api/auth/register",
+		strings.NewReader(`{"username":"viewer","password":"secret123"}`),
+	))
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+}
+
+func TestRegisterRouteConsumesInviteCodeOnSuccess(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	invite, err := cat.CreateInviteCode(context.Background())
+	if err != nil {
+		t.Fatalf("create invite code: %v", err)
+	}
+
+	srv := &Server{Catalog: cat}
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	r := chi.NewRouter()
+	srv.RegisterRoutes(r, viewerAuth)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(
+		http.MethodPost,
+		"/api/auth/register",
+		strings.NewReader(`{"username":"viewer","password":"secret123","inviteCode":"`+invite.Code+`"}`),
+	))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("register status = %d body = %s", rr.Code, rr.Body.String())
+	}
+
+	invites, err := cat.ListInviteCodes(context.Background())
+	if err != nil {
+		t.Fatalf("list invite codes: %v", err)
+	}
+	if len(invites) != 1 {
+		t.Fatalf("invite count = %d, want 1", len(invites))
+	}
+	if invites[0].Status != "used" {
+		t.Fatalf("invite status = %q, want used", invites[0].Status)
+	}
+	if invites[0].UsedByUserID == "" {
+		t.Fatal("expected invite to be bound to created user")
+	}
+	if invites[0].UsedAt.IsZero() {
+		t.Fatal("expected invite to have used timestamp")
 	}
 }
 
@@ -125,7 +200,11 @@ func TestDisabledViewerCannotLogIn(t *testing.T) {
 	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(``))
-	user, err := viewerAuth.Register(rr, req, "viewer", "secret123")
+	invite, err := cat.CreateInviteCode(context.Background())
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	user, err := viewerAuth.Register(rr, req, "viewer", "secret123", invite.Code)
 	if err != nil {
 		t.Fatalf("register viewer: %v", err)
 	}
@@ -1455,7 +1534,11 @@ func viewerSessionCookie(t *testing.T, a *auth.UserAuthenticator) *http.Cookie {
 	t.Helper()
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(``))
-	if _, err := a.Register(rr, req, "viewer", "secret123"); err != nil {
+	invite, err := a.Catalog.CreateInviteCode(context.Background())
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, err := a.Register(rr, req, "viewer", "secret123", invite.Code); err != nil {
 		t.Fatalf("register viewer: %v", err)
 	}
 	cookies := rr.Result().Cookies()

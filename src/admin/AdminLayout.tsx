@@ -120,6 +120,17 @@ export function AdminLayout() {
               </span>
             </NavLink>
             <NavLink
+              to="/admin/invites"
+              className={({ isActive }) =>
+                `admin-nav__link ${isActive ? "is-active" : ""}`
+              }
+            >
+              <span className="admin-nav__icon"><Users size={16} /></span>
+              <span className="admin-nav__text">
+                <span className="admin-nav__title">邀请码</span>
+              </span>
+            </NavLink>
+            <NavLink
               to="/admin/videos"
               className={({ isActive }) =>
                 `admin-nav__link ${isActive ? "is-active" : ""}`

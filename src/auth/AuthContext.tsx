@@ -15,7 +15,7 @@ type ViewerAuthCtx = {
   status: ViewerAuthStatus;
   username: string | null;
   login: (username: string, password: string) => Promise<void>;
-  register: (username: string, password: string) => Promise<void>;
+  register: (username: string, password: string, inviteCode: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 };
@@ -62,8 +62,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsername(user.trim() || user);
   }, []);
 
-  const register = useCallback(async (user: string, password: string) => {
-    const res = await api.register(user, password);
+  const register = useCallback(async (user: string, password: string, inviteCode: string) => {
+    const res = await api.register(user, password, inviteCode);
     setStatus("authed");
     setUsername(res.username);
   }, []);

@@ -170,6 +170,19 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
     ON user_sessions(user_id);
 
+CREATE TABLE IF NOT EXISTS invite_codes (
+    id              TEXT PRIMARY KEY,
+    code            TEXT NOT NULL UNIQUE,
+    status          TEXT NOT NULL DEFAULT 'unused',
+    created_at      INTEGER NOT NULL,
+    used_at         INTEGER,
+    used_by_user_id TEXT,
+    FOREIGN KEY(used_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_invite_codes_created_at
+    ON invite_codes(created_at);
+
 -- 管理后台登录永久封禁 IP
 CREATE TABLE IF NOT EXISTS banned_login_ips (
     ip         TEXT PRIMARY KEY,

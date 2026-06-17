@@ -2,8 +2,10 @@ package catalog
 
 import (
 	"context"
+	crand "crypto/rand"
 	"database/sql"
 	_ "embed"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,16 @@ type FrontendUser struct {
 	Status       string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type InviteCode struct {
+	ID             string
+	Code           string
+	Status         string
+	CreatedAt      time.Time
+	UsedAt         time.Time
+	UsedByUserID   string
+	UsedByUsername string
 }
 
 type CrawlerAssetCounts struct {
@@ -2329,6 +2341,142 @@ func (c *Catalog) DeleteFrontendUser(ctx context.Context, userID string) error {
 	return nil
 }
 
+func (c *Catalog) CreateInviteCode(ctx context.Context) (*InviteCode, error) {
+	now := time.Now()
+	id, err := newInviteCodeToken(16)
+	if err != nil {
+		return nil, err
+	}
+	code, err := newInviteCodeDisplay()
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.db.ExecContext(ctx, `
+INSERT INTO invite_codes (id, code, status, created_at)
+VALUES (?, ?, 'unused', ?)`,
+		id,
+		code,
+		now.UnixMilli(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &InviteCode{
+		ID:        id,
+		Code:      code,
+		Status:    "unused",
+		CreatedAt: now,
+	}, nil
+}
+
+func (c *Catalog) ListInviteCodes(ctx context.Context) ([]*InviteCode, error) {
+	rows, err := c.db.QueryContext(ctx, `
+SELECT ic.id, ic.code, ic.status, ic.created_at, COALESCE(ic.used_at, 0), COALESCE(ic.used_by_user_id, ''), COALESCE(u.username, '')
+FROM invite_codes ic
+LEFT JOIN users u ON u.id = ic.used_by_user_id
+ORDER BY ic.created_at ASC, ic.id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*InviteCode
+	for rows.Next() {
+		var invite InviteCode
+		var createdAt, usedAt int64
+		if err := rows.Scan(
+			&invite.ID,
+			&invite.Code,
+			&invite.Status,
+			&createdAt,
+			&usedAt,
+			&invite.UsedByUserID,
+			&invite.UsedByUsername,
+		); err != nil {
+			return nil, err
+		}
+		invite.CreatedAt = time.UnixMilli(createdAt)
+		if usedAt > 0 {
+			invite.UsedAt = time.UnixMilli(usedAt)
+		}
+		out = append(out, &invite)
+	}
+	return out, rows.Err()
+}
+
+var (
+	ErrInviteCodeRequired = errors.New("invite code is required")
+	ErrInviteCodeInvalid  = errors.New("invite code is invalid")
+	ErrInviteCodeUsed     = errors.New("invite code has already been used")
+)
+
+func (c *Catalog) CreateUserWithInviteCode(ctx context.Context, id, username, passwordHash, inviteCode string) error {
+	username = strings.TrimSpace(username)
+	inviteCode = strings.TrimSpace(strings.ToUpper(inviteCode))
+	if inviteCode == "" {
+		return ErrInviteCodeRequired
+	}
+
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var inviteID string
+	var inviteStatus string
+	err = tx.QueryRowContext(ctx, `
+SELECT id, status
+FROM invite_codes
+WHERE code = ?`, inviteCode).Scan(&inviteID, &inviteStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrInviteCodeInvalid
+	}
+	if err != nil {
+		return err
+	}
+	if inviteStatus != "unused" {
+		return ErrInviteCodeUsed
+	}
+
+	now := time.Now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO users (id, username, password_hash, status, created_at, updated_at)
+VALUES (?, ?, ?, 'active', ?, ?)`,
+		id,
+		username,
+		passwordHash,
+		now,
+		now,
+	); err != nil {
+		return err
+	}
+
+	res, err := tx.ExecContext(ctx, `
+UPDATE invite_codes
+SET status = 'used',
+    used_at = ?,
+    used_by_user_id = ?
+WHERE id = ?
+  AND status = 'unused'`,
+		now,
+		id,
+		inviteID,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrInviteCodeUsed
+	}
+
+	return tx.Commit()
+}
+
 func (c *Catalog) BanLoginIP(ctx context.Context, ip, reason string) error {
 	now := time.Now().UnixMilli()
 	_, err := c.db.ExecContext(ctx,
@@ -2478,4 +2626,21 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func newInviteCodeDisplay() (string, error) {
+	raw, err := newInviteCodeToken(10)
+	if err != nil {
+		return "", err
+	}
+	trimmed := raw[:12]
+	return trimmed[:4] + "-" + trimmed[4:8] + "-" + trimmed[8:12], nil
+}
+
+func newInviteCodeToken(size int) (string, error) {
+	buf := make([]byte, size)
+	if _, err := crand.Read(buf); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf), "="), nil
 }

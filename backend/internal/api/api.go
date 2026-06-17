@@ -131,8 +131,9 @@ type Comment struct {
 }
 
 type viewerAuthReq struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	InviteCode string `json:"inviteCode"`
 }
 
 func (s *Server) handleViewerRegister(a *auth.UserAuthenticator) http.HandlerFunc {
@@ -151,8 +152,20 @@ func (s *Server) handleViewerRegister(a *auth.UserAuthenticator) http.HandlerFun
 			http.Error(w, "password must be at least 6 characters", http.StatusBadRequest)
 			return
 		}
-		user, err := a.Register(w, r, username, body.Password)
+		if strings.TrimSpace(body.InviteCode) == "" {
+			http.Error(w, "invite code is required", http.StatusBadRequest)
+			return
+		}
+		user, err := a.Register(w, r, username, body.Password, body.InviteCode)
 		if err != nil {
+			if errors.Is(err, catalog.ErrInviteCodeRequired) || errors.Is(err, catalog.ErrInviteCodeInvalid) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if errors.Is(err, catalog.ErrInviteCodeUsed) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
 			errText := strings.ToLower(err.Error())
 			if strings.Contains(errText, "unique") || strings.Contains(errText, "constraint") {
 				http.Error(w, "username already exists", http.StatusConflict)

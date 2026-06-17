@@ -160,6 +160,16 @@ type adminFrontendUserDTO struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
+type adminInviteCodeDTO struct {
+	ID             string `json:"id"`
+	Code           string `json:"code"`
+	Status         string `json:"status"`
+	CreatedAt      string `json:"createdAt"`
+	UsedAt         string `json:"usedAt"`
+	UsedByUserID   string `json:"usedByUserId"`
+	UsedByUsername string `json:"usedByUsername"`
+}
+
 type setUserStatusReq struct {
 	Status string `json:"status"`
 }
@@ -167,6 +177,7 @@ type setUserStatusReq struct {
 type resetUserPasswordReq struct {
 	Password string `json:"password"`
 }
+
 
 func (a *AdminServer) Register(r chi.Router) {
 	r.Route("/admin/api", func(r chi.Router) {
@@ -186,6 +197,8 @@ func (a *AdminServer) Register(r chi.Router) {
 			r.Post("/users/{id}/status", a.handleSetUserStatus)
 			r.Post("/users/{id}/reset-password", a.handleResetUserPassword)
 			r.Delete("/users/{id}", a.handleDeleteUser)
+			r.Get("/invite-codes", a.handleListInviteCodes)
+			r.Post("/invite-codes", a.handleCreateInviteCode)
 
 			// 网盘
 			r.Get("/drives", a.handleListDrives)
@@ -470,6 +483,44 @@ func (a *AdminServer) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *AdminServer) handleListInviteCodes(w http.ResponseWriter, r *http.Request) {
+	invites, err := a.Catalog.ListInviteCodes(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]adminInviteCodeDTO, 0, len(invites))
+	for _, invite := range invites {
+		dto := adminInviteCodeDTO{
+			ID:             invite.ID,
+			Code:           invite.Code,
+			Status:         invite.Status,
+			CreatedAt:      invite.CreatedAt.Format(time.RFC3339),
+			UsedByUserID:   invite.UsedByUserID,
+			UsedByUsername: invite.UsedByUsername,
+		}
+		if !invite.UsedAt.IsZero() {
+			dto.UsedAt = invite.UsedAt.Format(time.RFC3339)
+		}
+		out = append(out, dto)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *AdminServer) handleCreateInviteCode(w http.ResponseWriter, r *http.Request) {
+	invite, err := a.Catalog.CreateInviteCode(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, adminInviteCodeDTO{
+		ID:        invite.ID,
+		Code:      invite.Code,
+		Status:    invite.Status,
+		CreatedAt: invite.CreatedAt.Format(time.RFC3339),
+	})
 }
 
 func (a *AdminServer) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {

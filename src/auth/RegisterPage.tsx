@@ -4,6 +4,7 @@ import { useViewerAuth } from "./AuthContext";
 
 export function RegisterPage() {
   const { status, register } = useViewerAuth();
+  const [inviteCode, setInviteCode] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -31,9 +32,13 @@ export function RegisterPage() {
       setErr("两次输入的密码不一致");
       return;
     }
+    if (!inviteCode.trim()) {
+      setErr("邀请码不能为空");
+      return;
+    }
     setLoading(true);
     try {
-      await register(username, password);
+      await register(username, password, inviteCode);
       const from = (location.state as { from?: string } | null)?.from ?? "/";
       navigate(from, { replace: true });
     } catch (error) {
@@ -48,6 +53,15 @@ export function RegisterPage() {
       <form className="admin-login__card" onSubmit={handleSubmit}>
         <h1 className="admin-login__title">用户注册</h1>
         <div className="admin-form">
+          <div className="admin-form__row">
+            <label htmlFor="viewer-register-invite">邀请码</label>
+            <input
+              id="viewer-register-invite"
+              autoComplete="off"
+              value={inviteCode}
+              onChange={(e) => setInviteCode(e.target.value)}
+            />
+          </div>
           <div className="admin-form__row">
             <label htmlFor="viewer-register-username">用户名</label>
             <input
@@ -85,6 +99,7 @@ export function RegisterPage() {
             type="submit"
             disabled={
               loading ||
+              !inviteCode.trim() ||
               !username ||
               !password ||
               !confirmPassword ||

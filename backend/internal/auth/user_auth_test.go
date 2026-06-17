@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,8 +20,12 @@ func TestUserAuthenticatorRegisterHashesPasswordAndSetsVsUserCookie(t *testing.T
 	authr := &UserAuthenticator{Catalog: cat}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{}`))
+	invite, err := cat.CreateInviteCode(req.Context())
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
 
-	user, err := authr.Register(rr, req, "viewer", "secret123")
+	user, err := authr.Register(rr, req, "viewer", "secret123", invite.Code)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -54,11 +59,16 @@ func TestUserAuthenticatorLoginRejectsWrongPassword(t *testing.T) {
 	t.Cleanup(func() { _ = cat.Close() })
 
 	authr := &UserAuthenticator{Catalog: cat}
+	invite, err := cat.CreateInviteCode(context.Background())
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
 	if _, err := authr.Register(
 		httptest.NewRecorder(),
 		httptest.NewRequest(http.MethodPost, "/api/auth/register", nil),
 		"viewer",
 		"secret123",
+		invite.Code,
 	); err != nil {
 		t.Fatalf("register seed user: %v", err)
 	}

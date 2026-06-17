@@ -21,10 +21,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
-export function register(username: string, password: string) {
+export function register(username: string, password: string, inviteCode: string) {
   return request<{ ok: boolean; username: string }>("/register", {
     method: "POST",
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, inviteCode }),
   });
 }
 

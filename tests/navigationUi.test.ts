@@ -12,6 +12,12 @@ const topBarSource = readFileSync(
   "utf8"
 );
 
+const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const adminLayoutSource = readFileSync(
+  new URL("../src/admin/AdminLayout.tsx", import.meta.url),
+  "utf8"
+);
+
 function ruleBody(css: string, selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = css.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`));
@@ -20,10 +26,9 @@ function ruleBody(css: string, selector: string): string {
 }
 
 test("mobile menu links fill the full expanded menu row", () => {
-  // 默认 .main-nav__link 用 inline-flex（mobile 段不重写 display，所以仍是 flex 容器）。
   const baseBody = ruleBody(navigationCss, ".main-nav__link");
   assert.match(baseBody, /display\s*:\s*(?:inline-)?flex\b/);
-  // mobile 展开态把链接铺满整行。
+
   const openBody = ruleBody(navigationCss, ".main-nav.is-open .main-nav__link");
   assert.match(openBody, /width\s*:\s*100%/);
 });
@@ -31,4 +36,9 @@ test("mobile menu links fill the full expanded menu row", () => {
 test("top bar does not render inactive public auth links", () => {
   assert.doesNotMatch(topBarSource, /href="#(?:register|login)"/);
   assert.doesNotMatch(topBarSource, />\s*(?:注册|登录)\s*</);
+});
+
+test("admin app exposes invite code navigation and route", () => {
+  assert.match(appSource, /path="invites"/);
+  assert.match(adminLayoutSource, /to="\/admin\/invites"/);
 });

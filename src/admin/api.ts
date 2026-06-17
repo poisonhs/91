@@ -100,6 +100,26 @@ export function deleteUser(id: string) {
   });
 }
 
+export type AdminInviteCode = {
+  id: string;
+  code: string;
+  status: "unused" | "used";
+  createdAt: string;
+  usedAt: string;
+  usedByUserId: string;
+  usedByUsername: string;
+};
+
+export function listInviteCodes() {
+  return request<AdminInviteCode[]>("/invite-codes");
+}
+
+export function createInviteCode() {
+  return request<AdminInviteCode>("/invite-codes", {
+    method: "POST",
+  });
+}
+
 export type UpdateCheck = {
   currentVersion: string;
   latestVersion: string;
