@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/video-site/backend/internal/auth"
 	"github.com/video-site/backend/internal/catalog"
@@ -151,6 +152,22 @@ type deleteVideoReq struct {
 	DeleteSource bool `json:"deleteSource"`
 }
 
+type adminFrontendUserDTO struct {
+	ID        string `json:"id"`
+	Username  string `json:"username"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+type setUserStatusReq struct {
+	Status string `json:"status"`
+}
+
+type resetUserPasswordReq struct {
+	Password string `json:"password"`
+}
+
 func (a *AdminServer) Register(r chi.Router) {
 	r.Route("/admin/api", func(r chi.Router) {
 		// 登录、登出和首次部署初始化不需要鉴权
@@ -163,6 +180,12 @@ func (a *AdminServer) Register(r chi.Router) {
 		// 其余路由需鉴权
 		r.Group(func(r chi.Router) {
 			r.Use(a.Auth.Required)
+
+			// 前台用户
+			r.Get("/users", a.handleListUsers)
+			r.Post("/users/{id}/status", a.handleSetUserStatus)
+			r.Post("/users/{id}/reset-password", a.handleResetUserPassword)
+			r.Delete("/users/{id}", a.handleDeleteUser)
 
 			// 网盘
 			r.Get("/drives", a.handleListDrives)
@@ -340,6 +363,113 @@ func (a *AdminServer) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	ok, _ := a.Catalog.ValidateSession(r.Context(), c.Value)
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": ok})
+}
+
+func (a *AdminServer) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := a.Catalog.ListFrontendUsers(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]adminFrontendUserDTO, 0, len(users))
+	for _, user := range users {
+		out = append(out, adminFrontendUserDTO{
+			ID:        user.ID,
+			Username:  user.Username,
+			Status:    user.Status,
+			CreatedAt: user.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *AdminServer) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	var body setUserStatusReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if body.Status != "active" && body.Status != "disabled" {
+		http.Error(w, "invalid status", http.StatusBadRequest)
+		return
+	}
+	if err := a.Catalog.SetFrontendUserStatus(r.Context(), id, body.Status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if body.Status == "disabled" {
+		if err := a.Catalog.DeleteFrontendUserSessions(r.Context(), id); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": body.Status})
+}
+
+func (a *AdminServer) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	var body resetUserPasswordReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(body.Password) < 6 {
+		http.Error(w, "password must be at least 6 characters", http.StatusBadRequest)
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.Catalog.SetFrontendUserPasswordHash(r.Context(), id, string(hash)); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.Catalog.DeleteFrontendUserSessions(r.Context(), id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *AdminServer) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	if err := a.Catalog.DeleteFrontendUserSessions(r.Context(), id); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.Catalog.DeleteFrontendUser(r.Context(), id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *AdminServer) handleCheckUpdate(w http.ResponseWriter, r *http.Request) {

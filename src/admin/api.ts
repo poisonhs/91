@@ -62,6 +62,44 @@ export function me() {
   return request<{ authenticated: boolean }>("/me");
 }
 
+export type AdminFrontendUser = {
+  id: string;
+  username: string;
+  status: "active" | "disabled";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function listUsers() {
+  return request<AdminFrontendUser[]>("/users");
+}
+
+export function setUserStatus(id: string, status: "active" | "disabled") {
+  return request<{ ok: boolean; status: "active" | "disabled" }>(
+    `/users/${encodeURIComponent(id)}/status`,
+    {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    }
+  );
+}
+
+export function resetUserPassword(id: string, password: string) {
+  return request<{ ok: boolean }>(
+    `/users/${encodeURIComponent(id)}/reset-password`,
+    {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }
+  );
+}
+
+export function deleteUser(id: string) {
+  return request<{ ok: boolean }>(`/users/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export type UpdateCheck = {
   currentVersion: string;
   latestVersion: string;

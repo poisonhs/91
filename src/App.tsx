@@ -12,6 +12,7 @@ import { CrawlersPage } from "@/admin/CrawlersPage";
 import { VideosPage } from "@/admin/VideosPage";
 import { TagsPage } from "@/admin/TagsPage";
 import { ThemePage } from "@/admin/ThemePage";
+import { UsersPage } from "@/admin/UsersPage";
 import { LoginPage as ViewerLoginPage } from "@/auth/LoginPage";
 import { RegisterPage } from "@/auth/RegisterPage";
 import { RequireUserAuth } from "@/auth/RequireUserAuth";
@@ -72,6 +73,7 @@ export default function App() {
           <Route index element={<Navigate to="/admin/drives" replace />} />
           <Route path="drives" element={<DrivesPage />} />
           <Route path="crawlers" element={<CrawlersPage />} />
+          <Route path="users" element={<UsersPage />} />
           <Route path="videos" element={<VideosPage />} />
           <Route path="tags" element={<TagsPage />} />
           <Route path="theme" element={<ThemePage />} />

@@ -179,6 +179,149 @@ func TestHandleDeleteVideoPassesDeleteSourceOption(t *testing.T) {
 	}
 }
 
+func TestHandleListUsersReturnsFrontendUsers(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	if err := cat.CreateUser(ctx, "user-1", "alpha", "hash-1"); err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/users", nil)
+	rr := httptest.NewRecorder()
+	(&AdminServer{Catalog: cat}).handleListUsers(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got []struct {
+		Username string `json:"username"`
+		Status   string `json:"status"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].Username != "alpha" || got[0].Status != "active" {
+		t.Fatalf("response = %#v, want alpha active", got)
+	}
+}
+
+func TestHandleSetUserStatusDisablesUserAndClearsSessions(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	if err := cat.CreateUser(ctx, "user-1", "viewer", "hash-1"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := cat.CreateUserSession(ctx, "token-1", "user-1", 24*time.Hour); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	req := requestWithRouteParam(http.MethodPost, "/admin/api/users/user-1/status", "id", "user-1", strings.NewReader(`{"status":"disabled"}`))
+	rr := httptest.NewRecorder()
+	(&AdminServer{Catalog: cat}).handleSetUserStatus(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	user, err := cat.GetUserByUsername(ctx, "viewer")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if user.Status != "disabled" {
+		t.Fatalf("status = %q, want disabled", user.Status)
+	}
+	_, ok, err := cat.GetUserBySessionToken(ctx, "token-1")
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if ok {
+		t.Fatal("session still valid after disable")
+	}
+}
+
+func TestHandleResetUserPasswordRehashesPasswordAndClearsSessions(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(``))
+	user, err := viewerAuth.Register(rr, req, "viewer", "secret123")
+	if err != nil {
+		t.Fatalf("register viewer: %v", err)
+	}
+	cookie := rr.Result().Cookies()[0]
+
+	resetReq := requestWithRouteParam(http.MethodPost, "/admin/api/users/"+user.ID+"/reset-password", "id", user.ID, strings.NewReader(`{"password":"newpass123"}`))
+	resetRR := httptest.NewRecorder()
+	(&AdminServer{Catalog: cat}).handleResetUserPassword(resetRR, resetReq)
+
+	if resetRR.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resetRR.Code, resetRR.Body.String())
+	}
+	_, ok, err := cat.GetUserBySessionToken(ctx, cookie.Value)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if ok {
+		t.Fatal("session still valid after reset")
+	}
+	ok, err = viewerAuth.Login(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/auth/login", nil), "viewer", "secret123")
+	if err != nil {
+		t.Fatalf("old login error: %v", err)
+	}
+	if ok {
+		t.Fatal("old password still works")
+	}
+	ok, err = viewerAuth.Login(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/auth/login", nil), "viewer", "newpass123")
+	if err != nil {
+		t.Fatalf("new login error: %v", err)
+	}
+	if !ok {
+		t.Fatal("new password login failed")
+	}
+}
+
+func TestHandleDeleteUserRemovesViewer(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	if err := cat.CreateUser(ctx, "user-1", "viewer", "hash-1"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	req := requestWithRouteParam(http.MethodDelete, "/admin/api/users/user-1", "id", "user-1", strings.NewReader(``))
+	rr := httptest.NewRecorder()
+	(&AdminServer{Catalog: cat}).handleDeleteUser(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	user, err := cat.GetUserByUsername(ctx, "viewer")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if user != nil {
+		t.Fatalf("user still exists: %#v", user)
+	}
+}
+
 func TestHandleCheckUpdateReportsNewRelease(t *testing.T) {
 	dir := t.TempDir()
 	versionFile := filepath.Join(dir, ".version")

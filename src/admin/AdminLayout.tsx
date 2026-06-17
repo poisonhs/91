@@ -5,6 +5,7 @@ import {
   Film,
   LogOut,
   Home,
+  Users,
   Tags,
   Palette,
   RefreshCw,
@@ -107,6 +108,17 @@ export function AdminLayout() {
           </div>
           <div className="admin-nav__group">
             <span className="admin-nav__group-label">管理</span>
+            <NavLink
+              to="/admin/users"
+              className={({ isActive }) =>
+                `admin-nav__link ${isActive ? "is-active" : ""}`
+              }
+            >
+              <span className="admin-nav__icon"><Users size={16} /></span>
+              <span className="admin-nav__text">
+                <span className="admin-nav__title">鐢ㄦ埛绠＄悊</span>
+              </span>
+            </NavLink>
             <NavLink
               to="/admin/videos"
               className={({ isActive }) =>

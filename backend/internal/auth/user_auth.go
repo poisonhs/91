@@ -56,6 +56,9 @@ func (a *UserAuthenticator) Login(w http.ResponseWriter, r *http.Request, userna
 	if user == nil {
 		return false, nil
 	}
+	if user.Status != "active" {
+		return false, nil
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 			return false, nil
@@ -76,6 +79,9 @@ func (a *UserAuthenticator) CurrentUser(r *http.Request) (*Viewer, bool, error) 
 	user, ok, err := a.Catalog.GetUserBySessionToken(r.Context(), cookie.Value)
 	if err != nil || !ok {
 		return nil, ok, err
+	}
+	if user.Status != "active" {
+		return nil, false, nil
 	}
 	return &Viewer{ID: user.ID, Username: user.Username}, true, nil
 }

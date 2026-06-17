@@ -115,6 +115,64 @@ func TestViewerRoutesAreWatchOnly(t *testing.T) {
 	}
 }
 
+func TestDisabledViewerCannotLogIn(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(``))
+	user, err := viewerAuth.Register(rr, req, "viewer", "secret123")
+	if err != nil {
+		t.Fatalf("register viewer: %v", err)
+	}
+	if err := cat.SetFrontendUserStatus(context.Background(), user.ID, "disabled"); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+
+	ok, err := viewerAuth.Login(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/auth/login", nil), "viewer", "secret123")
+	if err != nil {
+		t.Fatalf("login error: %v", err)
+	}
+	if ok {
+		t.Fatal("disabled viewer login succeeded")
+	}
+}
+
+func TestDisabledViewerSessionIsRejectedOnProtectedRoute(t *testing.T) {
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	srv := &Server{Catalog: cat}
+	viewerAuth := &auth.UserAuthenticator{Catalog: cat}
+	r := chi.NewRouter()
+	srv.RegisterRoutes(r, viewerAuth)
+
+	cookie := viewerSessionCookie(t, viewerAuth)
+	user, ok, err := cat.GetUserBySessionToken(context.Background(), cookie.Value)
+	if err != nil || !ok {
+		t.Fatalf("session lookup ok=%v err=%v", ok, err)
+	}
+	if err := cat.SetFrontendUserStatus(context.Background(), user.ID, "disabled"); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/home", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
 func TestVideoSourceUsesDirectStreamForAvi(t *testing.T) {
 	v := &catalog.Video{
 		ID:      "video-1",

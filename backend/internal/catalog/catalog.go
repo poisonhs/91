@@ -2242,6 +2242,93 @@ func (c *Catalog) DeleteUserSession(ctx context.Context, token string) error {
 	return err
 }
 
+func (c *Catalog) ListFrontendUsers(ctx context.Context) ([]*FrontendUser, error) {
+	rows, err := c.db.QueryContext(ctx, `
+SELECT id, username, password_hash, status, created_at, updated_at
+FROM users
+ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*FrontendUser
+	for rows.Next() {
+		var user FrontendUser
+		var createdAt, updatedAt int64
+		if err := rows.Scan(
+			&user.ID,
+			&user.Username,
+			&user.PasswordHash,
+			&user.Status,
+			&createdAt,
+			&updatedAt,
+		); err != nil {
+			return nil, err
+		}
+		user.CreatedAt = time.UnixMilli(createdAt)
+		user.UpdatedAt = time.UnixMilli(updatedAt)
+		out = append(out, &user)
+	}
+	return out, rows.Err()
+}
+
+func (c *Catalog) DeleteFrontendUserSessions(ctx context.Context, userID string) error {
+	_, err := c.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id = ?`, userID)
+	return err
+}
+
+func (c *Catalog) SetFrontendUserStatus(ctx context.Context, userID, status string) error {
+	res, err := c.db.ExecContext(ctx, `
+UPDATE users
+SET status = ?, updated_at = ?
+WHERE id = ?`, status, time.Now().UnixMilli(), userID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (c *Catalog) SetFrontendUserPasswordHash(ctx context.Context, userID, passwordHash string) error {
+	res, err := c.db.ExecContext(ctx, `
+UPDATE users
+SET password_hash = ?, updated_at = ?
+WHERE id = ?`, passwordHash, time.Now().UnixMilli(), userID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (c *Catalog) DeleteFrontendUser(ctx context.Context, userID string) error {
+	res, err := c.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (c *Catalog) BanLoginIP(ctx context.Context, ip, reason string) error {
 	now := time.Now().UnixMilli()
 	_, err := c.db.ExecContext(ctx,
